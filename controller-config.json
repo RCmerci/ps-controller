@@ -97,10 +97,10 @@
         }
       },
       {
-        "title": "Chrome test.logseq.com",
+        "title": "Chrome chatgpt.com",
         "script": {
-          "name": "switch-chrome-test-logseq",
-          "command": "osascript -e 'tell application \"Google Chrome\" to activate' -e 'tell application \"Google Chrome\"' -e 'repeat with w in windows' -e 'set i to 1' -e 'repeat with t in tabs of w' -e 'if (URL of t contains \"test.logseq.com\") then' -e 'set active tab index of w to i' -e 'set index of w to 1' -e 'return' -e 'end if' -e 'set i to i + 1' -e 'end repeat' -e 'end repeat' -e 'end tell'"
+          "name": "switch-chrome-chatgpt",
+          "command": "echo '[slot2] switch to ChatGPT in Chrome' && __found=\"$(osascript -e 'tell application \"Google Chrome\" to activate' -e 'tell application \"Google Chrome\"' -e 'repeat with w in windows' -e 'set i to 1' -e 'repeat with t in tabs of w' -e 'if (URL of t contains \"chatgpt.com\") then' -e 'set active tab index of w to i' -e 'set index of w to 1' -e 'return \"FOUND\"' -e 'end if' -e 'set i to i + 1' -e 'end repeat' -e 'end repeat' -e 'return \"NOT_FOUND\"' -e 'end tell')\" && echo \"[slot2] chatgpt_tab=${__found}\" && ([ \"${__found}\" = \"FOUND\" ] || open -a 'Google Chrome' 'https://chatgpt.com') && osascript -e 'tell application \"Google Chrome\" to activate' -e 'delay 0.15' -e 'tell application \"System Events\" to keystroke \"a\" using control down'"
         }
       },
       {
