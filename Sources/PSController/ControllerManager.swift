@@ -10,6 +10,7 @@ enum ControllerConnectionState {
 final class ControllerManager {
     private static let deadzone: Float = 0.12
     private static let fixedASRAutoStartAPIKey = "ps-controller-mlx-qwen3-asr"
+    private static let defaultASRJobTTLSeconds = 120
     private static let defaultKeyActionLabel = "Default Key"
     private static let shellBuiltins: Set<String> = [
         "alias", "bg", "bind", "break", "builtin", "cd", "command", "declare", "dirs", "echo", "eval",
@@ -27,13 +28,12 @@ final class ControllerManager {
     private let controllerActionHintPresenter: ControllerActionHintPresenting
     private let voiceInputController: VoiceInputControlling
     private let textInputInjector: TextInputInjecting
-    private let voiceTranscriptRefiner: VoiceTranscriptRefining
+    private let voiceTranscriptCorrector: VoiceTranscriptCorrecting
 
     private var configuration: ControllerConfiguration = .default
 
     private var isWheelVisible = false
     private var selectedWheelSlotIndex: Int?
-    private var pendingVoiceRefinementID: UUID?
     private var isControllerActionHintVisible = false
 
     var onLog: ((String) -> Void)?
@@ -70,7 +70,7 @@ final class ControllerManager {
         controllerActionHintPresenter: ControllerActionHintPresenting = ControllerActionHintPresenter(),
         voiceInputController: VoiceInputControlling = Qwen3ASRVoiceInputController(),
         textInputInjector: TextInputInjecting = CGEventTextInputInjector(),
-        voiceTranscriptRefiner: VoiceTranscriptRefining = OllamaVoiceTranscriptRefiner()
+        voiceTranscriptCorrector: VoiceTranscriptCorrecting = DictionaryVoiceTranscriptCorrector()
     ) {
         self.mouseBridge = mouseBridge
         self.logger = logger
@@ -80,7 +80,7 @@ final class ControllerManager {
         self.controllerActionHintPresenter = controllerActionHintPresenter
         self.voiceInputController = voiceInputController
         self.textInputInjector = textInputInjector
-        self.voiceTranscriptRefiner = voiceTranscriptRefiner
+        self.voiceTranscriptCorrector = voiceTranscriptCorrector
         self.configuration = applyRuntimeVoiceInputAdjustments(
             configurationProvider.loadConfiguration().normalizedForRuntime()
         )
@@ -97,15 +97,19 @@ final class ControllerManager {
         )
         voiceInputController.updateConfiguration(configuration.voiceInput)
 
+        if let resolution = configurationProvider.latestResolutionInfo() {
+            logInfo("config_resolution source=\(resolution.source) path=\(resolution.url.path) fileExists=\(resolution.fileExists)")
+        } else {
+            logInfo("config_resolution source=unknown path=unknown fileExists=unknown")
+        }
+
         let voiceInputEnabled = configuration.voiceInput?.enabled == true
         let asrBaseURL = configuration.voiceInput?.asrServer.baseURL ?? "none"
         let asrModel = configuration.voiceInput?.asrServer.model ?? "none"
         let asrAPIKeyConfigured = !(configuration.voiceInput?.asrServer.apiKey.isEmpty ?? true)
         let asrAutoStart = configuration.voiceInput?.asrServer.autoStart ?? false
         let asrLaunchExecutable = configuration.voiceInput?.asrServer.launchExecutable ?? "none"
-        let llmRefinerEnabled = configuration.voiceInput?.llmRefiner.enabled == true
-        let llmRefinerModel = configuration.voiceInput?.llmRefiner.model ?? "none"
-        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) wheelSlots=\(configuration.leftThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=buttonB:zh-CN asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable) llmRefinerEnabled=\(llmRefinerEnabled) llmRefinerModel=\(llmRefinerModel)")
+        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) wheelSlots=\(configuration.leftThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=buttonB:zh-CN asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable)")
 
         prepareVoiceInputIfNeeded()
 
@@ -132,7 +136,6 @@ final class ControllerManager {
             hideWheelIfVisible(reason: "control_paused")
             hideControllerActionHintIfVisible(reason: "control_paused")
             voiceInputController.stopCapture(trigger: "control_paused")
-            cancelPendingVoiceRefinement(reason: "control_paused")
         }
         logInfo("Control enabled set to: \(enabled)")
     }
@@ -142,7 +145,6 @@ final class ControllerManager {
         stopASRAutoStartedProcessIfNeeded(reason: "controller_manager_deinit")
         hideControllerActionHintIfVisible(reason: "controller_manager_deinit")
         voiceInputController.stopCapture(trigger: "controller_manager_deinit")
-        cancelPendingVoiceRefinement(reason: "controller_manager_deinit")
 
         if let connectObserver {
             NotificationCenter.default.removeObserver(connectObserver)
@@ -456,47 +458,14 @@ final class ControllerManager {
             return
         }
 
-        guard let llmConfig = configuration.voiceInput?.llmRefiner, llmConfig.enabled else {
-            insertVoiceTranscriptAtCursor(normalized, source: "raw")
-            return
-        }
-
-        let refinementID = UUID()
-        pendingVoiceRefinementID = refinementID
-        logInfo("voice_input_refine_start id=\(refinementID.uuidString) model=\(llmConfig.model) baseURL=\(llmConfig.baseURL)")
-
-        voiceTranscriptRefiner.refine(text: normalized, configuration: llmConfig) { [weak self] result in
-            guard let self else { return }
-
-            guard self.pendingVoiceRefinementID == refinementID else {
-                self.logDebug("voice_input_refine_stale_response id=\(refinementID.uuidString)")
-                return
-            }
-
-            self.pendingVoiceRefinementID = nil
-
-            switch result {
-            case .success(let refinedText):
-                let cleaned = refinedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                let finalText = cleaned.isEmpty ? normalized : cleaned
-                self.logInfo("voice_input_refine_success id=\(refinementID.uuidString) changed=\(finalText != normalized)")
-                self.insertVoiceTranscriptAtCursor(finalText, source: "refined")
-            case .failure(let error):
-                self.logError("voice_input_refine_failed id=\(refinementID.uuidString) message=\(error.localizedDescription)")
-                self.insertVoiceTranscriptAtCursor(normalized, source: "refine_fallback")
-            }
-        }
+        let corrected = voiceTranscriptCorrector.correct(normalized)
+        let source = corrected == normalized ? "raw" : "dictionary_corrected"
+        insertVoiceTranscriptAtCursor(corrected, source: source)
     }
 
     private func insertVoiceTranscriptAtCursor(_ text: String, source: String) {
         let inserted = textInputInjector.insertAtCursor(text: text)
         logInfo("voice_input_insert_cursor success=\(inserted) chars=\(text.count) source=\(source)")
-    }
-
-    private func cancelPendingVoiceRefinement(reason: String) {
-        pendingVoiceRefinementID = nil
-        voiceTranscriptRefiner.cancelCurrentRefinement(reason: reason)
-        logDebug("voice_input_refine_cancel reason=\(reason)")
     }
 
     private func prepareVoiceInputIfNeeded() {
@@ -510,7 +479,7 @@ final class ControllerManager {
             return
         }
 
-        logInfo("voice_input_prepare buttons=buttonB:zh-CN asrBaseURL=\(voiceInput.asrServer.baseURL) asrModel=\(voiceInput.asrServer.model) asrApiKeyConfigured=\(!voiceInput.asrServer.apiKey.isEmpty) asrAutoStart=\(voiceInput.asrServer.autoStart) asrLaunchExecutable=\(voiceInput.asrServer.launchExecutable) llmRefinerEnabled=\(voiceInput.llmRefiner.enabled) llmModel=\(voiceInput.llmRefiner.model)")
+        logInfo("voice_input_prepare buttons=buttonB:zh-CN asrBaseURL=\(voiceInput.asrServer.baseURL) asrModel=\(voiceInput.asrServer.model) asrApiKeyConfigured=\(!voiceInput.asrServer.apiKey.isEmpty) asrAutoStart=\(voiceInput.asrServer.autoStart) asrLaunchExecutable=\(voiceInput.asrServer.launchExecutable)")
         voiceInputController.prepare()
     }
 
@@ -523,7 +492,6 @@ final class ControllerManager {
 
         let trigger = "button.\(button.rawValue)"
         if isPressed {
-            cancelPendingVoiceRefinement(reason: "new_capture_start")
             logInfo("voice_input_start trigger=\(trigger) locale=\(localeIdentifier)")
             voiceInputController.startCapture(trigger: trigger, localeIdentifier: localeIdentifier)
         } else {
@@ -696,8 +664,7 @@ final class ControllerManager {
         let updatedVoiceInput = VoiceInputConfiguration(
             enabled: voiceInput.enabled,
             activationButton: voiceInput.activationButton,
-            asrServer: updatedASRServer,
-            llmRefiner: voiceInput.llmRefiner
+            asrServer: updatedASRServer
         )
 
         if asrServer.apiKey.isEmpty {
@@ -855,19 +822,6 @@ final class ControllerManager {
             issues.append("ASR server unavailable at: \(asrHealthURL.absoluteString)")
         }
 
-        if voiceInput.llmRefiner.enabled {
-            let llmBaseURLText = voiceInput.llmRefiner.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let llmBaseURL = URL(string: llmBaseURLText) else {
-                issues.append("Invalid llmRefiner.baseURL: \(voiceInput.llmRefiner.baseURL)")
-                return issues
-            }
-
-            let tagsURL = llmBaseURL.appendingPathComponent("api/tags", isDirectory: false)
-            if !isHTTPServiceReachable(url: tagsURL, timeout: min(voiceInput.llmRefiner.timeoutSeconds, 5)) {
-                issues.append("Ollama unavailable at: \(tagsURL.absoluteString)")
-            }
-        }
-
         return issues
     }
 
@@ -889,6 +843,10 @@ final class ControllerManager {
         }
 
         var arguments = normalizedASRAutoStartArguments(asrServer)
+
+        if !containsCLIOption(arguments, "--job-ttl") {
+            arguments.append(contentsOf: ["--job-ttl", String(Self.defaultASRJobTTLSeconds)])
+        }
 
         if !containsCLIOption(arguments, "--api-key") {
             arguments.append(contentsOf: ["--api-key", asrServer.apiKey])
@@ -1000,7 +958,7 @@ final class ControllerManager {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        return normalized.isEmpty ? ["serve"] : normalized
+        return normalized.isEmpty ? ["serve", "--job-ttl", String(Self.defaultASRJobTTLSeconds)] : normalized
     }
 
     private func containsCLIOption(_ arguments: [String], _ option: String) -> Bool {

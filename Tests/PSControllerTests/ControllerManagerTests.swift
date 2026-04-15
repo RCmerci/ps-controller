@@ -108,6 +108,7 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.voiceInput?.asrServer, .default)
         XCTAssertEqual(decoded.voiceInput?.asrServer.autoStart, false)
         XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "mlx-qwen3-asr")
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["serve", "--job-ttl", "120"])
     }
 
     func testControllerConfigurationDecodesVoiceInputASRServerConfiguration() throws {
@@ -158,7 +159,7 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["serve", "--workers", "1"])
     }
 
-    func testControllerConfigurationDecodesVoiceInputLLMRefinerConfiguration() throws {
+    func testControllerConfigurationIgnoresUnknownLegacyVoiceField() throws {
         let json = """
         {
           "buttons": {
@@ -181,11 +182,9 @@ final class ControllerManagerTests: XCTestCase {
           "voiceInput": {
             "enabled": true,
             "activationButton": "buttonOptions",
-            "llmRefiner": {
+            "legacyWordFixer": {
               "enabled": true,
-              "baseURL": "http://127.0.0.1:11434",
-              "model": "gemma4:26b",
-              "timeoutSeconds": 9.5
+              "mode": "experimental"
             }
           }
         }
@@ -194,43 +193,9 @@ final class ControllerManagerTests: XCTestCase {
         let data = Data(json.utf8)
         let decoded = try JSONDecoder().decode(ControllerConfiguration.self, from: data)
 
-        XCTAssertEqual(decoded.voiceInput?.llmRefiner.enabled, true)
-        XCTAssertEqual(decoded.voiceInput?.llmRefiner.baseURL, "http://127.0.0.1:11434")
-        XCTAssertEqual(decoded.voiceInput?.llmRefiner.model, "gemma4:26b")
-        XCTAssertEqual(decoded.voiceInput?.llmRefiner.timeoutSeconds, 9.5)
-    }
-
-    func testControllerConfigurationUsesDefaultLLMRefinerWhenMissing() throws {
-        let json = """
-        {
-          "buttons": {
-            "buttonA": {
-              "name": "buttonA",
-              "command": "echo 'a'"
-            }
-          },
-          "leftThumbstickWheel": {
-            "activationThreshold": 0.45,
-            "slots": [
-              { "title": "Slot 1", "script": null },
-              { "title": "Slot 2", "script": null },
-              { "title": "Slot 3", "script": null },
-              { "title": "Slot 4", "script": null },
-              { "title": "Slot 5", "script": null },
-              { "title": "Cancel", "script": null }
-            ]
-          },
-          "voiceInput": {
-            "enabled": true,
-            "activationButton": "buttonOptions"
-          }
-        }
-        """
-
-        let data = Data(json.utf8)
-        let decoded = try JSONDecoder().decode(ControllerConfiguration.self, from: data)
-
-        XCTAssertEqual(decoded.voiceInput?.llmRefiner, .default)
+        XCTAssertEqual(decoded.voiceInput?.enabled, true)
+        XCTAssertEqual(decoded.voiceInput?.activationButton, .buttonOptions)
+        XCTAssertEqual(decoded.voiceInput?.asrServer, .default)
     }
 
     func testControllerManagerPropagatesVoiceInputConfigurationToController() {
@@ -474,21 +439,20 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(textInjector.insertedTexts, ["你好世界"])
     }
 
-    func testFinalVoiceTranscriptUsesRefinedTextWhenEnabled() {
+    func testFinalVoiceTranscriptAppliesDictionaryCorrection() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
         let textInjector = MockTextInputInjector()
-        let refiner = MockVoiceTranscriptRefiner()
-        refiner.nextResult = .success("你好，世界")
+        let corrector = MockVoiceTranscriptCorrector()
+        corrector.correctedText = "open Emacs"
 
         let config = ControllerConfiguration(
             buttons: [:],
             leftThumbstickWheel: makeWheelConfig(),
             voiceInput: VoiceInputConfiguration(
                 enabled: true,
-                activationButton: .buttonB,
-                llmRefiner: VoiceInputLLMRefinerConfiguration(enabled: true, baseURL: "http://127.0.0.1:11434", model: "gemma4:26b", timeoutSeconds: 6)
+                activationButton: .buttonB
             )
         ).normalizedForRuntime()
 
@@ -499,33 +463,30 @@ final class ControllerManagerTests: XCTestCase {
             wheelPresenter: MockLeftThumbstickWheelPresenter(),
             voiceInputController: voiceInput,
             textInputInjector: textInjector,
-            voiceTranscriptRefiner: refiner
+            voiceTranscriptCorrector: corrector
         )
 
         _ = sut
-        voiceInput.emitTranscript(text: "你好世界", isFinal: true)
+        voiceInput.emitTranscript(text: "open IMAX", isFinal: true)
 
-        XCTAssertEqual(refiner.refineCalls.count, 1)
-        XCTAssertEqual(refiner.refineCalls.first?.text, "你好世界")
-        XCTAssertEqual(refiner.refineCalls.first?.configuration.model, "gemma4:26b")
-        XCTAssertEqual(textInjector.insertedTexts, ["你好，世界"])
+        XCTAssertEqual(corrector.correctCalls, ["open IMAX"])
+        XCTAssertEqual(textInjector.insertedTexts, ["open Emacs"])
     }
 
-    func testFinalVoiceTranscriptFallsBackToOriginalTextWhenRefinementFails() {
+    func testFinalVoiceTranscriptKeepsOriginalTextWhenNoDictionaryMatch() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
         let textInjector = MockTextInputInjector()
-        let refiner = MockVoiceTranscriptRefiner()
-        refiner.nextResult = .failure(MockRefinerError.requestFailed)
+        let corrector = MockVoiceTranscriptCorrector()
+        corrector.correctedText = nil
 
         let config = ControllerConfiguration(
             buttons: [:],
             leftThumbstickWheel: makeWheelConfig(),
             voiceInput: VoiceInputConfiguration(
                 enabled: true,
-                activationButton: .buttonB,
-                llmRefiner: VoiceInputLLMRefinerConfiguration(enabled: true)
+                activationButton: .buttonB
             )
         ).normalizedForRuntime()
 
@@ -536,13 +497,13 @@ final class ControllerManagerTests: XCTestCase {
             wheelPresenter: MockLeftThumbstickWheelPresenter(),
             voiceInputController: voiceInput,
             textInputInjector: textInjector,
-            voiceTranscriptRefiner: refiner
+            voiceTranscriptCorrector: corrector
         )
 
         _ = sut
         voiceInput.emitTranscript(text: "你好世界", isFinal: true)
 
-        XCTAssertEqual(refiner.refineCalls.count, 1)
+        XCTAssertEqual(corrector.correctCalls, ["你好世界"])
         XCTAssertEqual(textInjector.insertedTexts, ["你好世界"])
     }
 
@@ -809,7 +770,7 @@ final class ControllerManagerTests: XCTestCase {
         wheelPresenter: LeftThumbstickWheelPresenting,
         voiceInputController: VoiceInputControlling = MockVoiceInputController(),
         textInputInjector: TextInputInjecting = MockTextInputInjector(),
-        voiceTranscriptRefiner: VoiceTranscriptRefining = MockVoiceTranscriptRefiner(),
+        voiceTranscriptCorrector: VoiceTranscriptCorrecting = MockVoiceTranscriptCorrector(),
         controllerActionHintPresenter: ControllerActionHintPresenting = MockControllerActionHintPresenter()
     ) -> ControllerManager {
         ControllerManager(
@@ -821,7 +782,7 @@ final class ControllerManagerTests: XCTestCase {
             controllerActionHintPresenter: controllerActionHintPresenter,
             voiceInputController: voiceInputController,
             textInputInjector: textInputInjector,
-            voiceTranscriptRefiner: voiceTranscriptRefiner
+            voiceTranscriptCorrector: voiceTranscriptCorrector
         )
     }
 
@@ -922,27 +883,13 @@ private final class MockTextInputInjector: TextInputInjecting {
     }
 }
 
-private enum MockRefinerError: Error {
-    case requestFailed
-}
+private final class MockVoiceTranscriptCorrector: VoiceTranscriptCorrecting {
+    var correctedText: String?
+    private(set) var correctCalls: [String] = []
 
-private final class MockVoiceTranscriptRefiner: VoiceTranscriptRefining {
-    struct RefineCall {
-        let text: String
-        let configuration: VoiceInputLLMRefinerConfiguration
-    }
-
-    var nextResult: Result<String, Error> = .success("")
-    private(set) var refineCalls: [RefineCall] = []
-    private(set) var cancelReasons: [String] = []
-
-    func refine(text: String, configuration: VoiceInputLLMRefinerConfiguration, completion: @escaping (Result<String, Error>) -> Void) {
-        refineCalls.append(.init(text: text, configuration: configuration))
-        completion(nextResult)
-    }
-
-    func cancelCurrentRefinement(reason: String) {
-        cancelReasons.append(reason)
+    func correct(_ text: String) -> String {
+        correctCalls.append(text)
+        return correctedText ?? text
     }
 }
 

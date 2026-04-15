@@ -13,6 +13,7 @@ build:
 	cp $(BUILD_DIR)/$(APP_NAME) $(APP_BUNDLE)/Contents/MacOS/
 	cp Info.plist $(APP_BUNDLE)/Contents/
 	cp controller-config.json $(APP_BUNDLE)/Contents/Resources/
+	cp voice-word-replacements.json $(APP_BUNDLE)/Contents/Resources/
 	codesign --force --sign - $(APP_BUNDLE)
 	@echo "\n✅ Built $(APP_BUNDLE)"
 

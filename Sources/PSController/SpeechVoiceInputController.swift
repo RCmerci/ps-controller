@@ -208,7 +208,7 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
     private func transcribeCapture(_ capture: CaptureContext) {
         let asrServer = voiceInputConfiguration.asrServer
 
-        let endpointURL = makeTranscriptionEndpointURL(baseURL: asrServer.baseURL)
+        let endpointURL = makeOpenAITranscriptionEndpointURL(baseURL: asrServer.baseURL)
         guard let endpointURL else {
             cleanupCaptureArtifacts(fileURL: capture.fileURL)
             logError("voice_transcription_failed reason=invalid_base_url baseURL=\(asrServer.baseURL) captureID=\(capture.id.uuidString)")
@@ -243,7 +243,7 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             asrServer: asrServer
         )
 
-        logInfo("voice_transcription_request_start requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) endpoint=\(endpointURL.absoluteString) model=\(asrServer.model) language=\(languageCode ?? "auto") bytes=\(audioData.count)")
+        logInfo("voice_transcription_request_start requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) endpoint=\(endpointURL.absoluteString) api=openai_compatible model=\(asrServer.model) language=\(languageCode ?? "auto") bytes=\(audioData.count)")
 
         let task = urlSession.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
@@ -307,19 +307,14 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             return
         }
 
-        let transcript: String
-        if (httpResponse.mimeType ?? "").lowercased().contains("text/plain") {
-            transcript = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            guard let responseData,
-                  let payload = try? JSONDecoder().decode(OpenAITranscriptionResponse.self, from: responseData),
-                  let text = payload.text else {
-                logError("voice_transcription_failed reason=invalid_json_payload requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
-                return
-            }
-
-            transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let responseData,
+              let payload = try? JSONDecoder().decode(OpenAITranscriptionResponse.self, from: responseData),
+              let text = payload.text else {
+            logError("voice_transcription_failed reason=invalid_json_payload requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+            return
         }
+
+        let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !transcript.isEmpty else {
             logInfo("voice_transcription_empty requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
@@ -345,7 +340,7 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             .appendingPathExtension("wav")
     }
 
-    private func makeTranscriptionEndpointURL(baseURL: String) -> URL? {
+    private func makeOpenAITranscriptionEndpointURL(baseURL: String) -> URL? {
         let normalizedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedBaseURL.isEmpty else { return nil }
 
@@ -399,12 +394,14 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         request.httpMethod = "POST"
         request.timeoutInterval = asrServer.timeoutSeconds
         request.setValue("Bearer \(asrServer.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
 
         appendMultipartField(name: "model", value: asrServer.model, boundary: boundary, body: &body)
         appendMultipartField(name: "response_format", value: "json", boundary: boundary, body: &body)
+        appendMultipartField(name: "temperature", value: "0", boundary: boundary, body: &body)
 
         if let languageCode, !languageCode.isEmpty {
             appendMultipartField(name: "language", value: languageCode, boundary: boundary, body: &body)

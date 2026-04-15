@@ -98,13 +98,7 @@ You can enable controller-triggered voice transcription with `voiceInput`:
       "timeoutSeconds": 30,
       "autoStart": true,
       "launchExecutable": "mlx-qwen3-asr",
-      "launchArguments": ["serve"]
-    },
-    "llmRefiner": {
-      "enabled": true,
-      "baseURL": "http://127.0.0.1:11434",
-      "model": "gemma4:26b",
-      "timeoutSeconds": 8
+      "launchArguments": ["serve", "--job-ttl", "120"]
     }
   }
 }
@@ -115,9 +109,34 @@ Runtime behavior:
 1. Press and hold `buttonB` to start `zh-CN` voice capture.
 2. Release `buttonB` to stop capture.
 3. Captured audio is sent to `mlx-qwen3-asr` HTTP server via `POST /v1/audio/transcriptions`.
-4. The ASR transcript is refined by local Ollama only when `llmRefiner.enabled` is `true`.
+4. The ASR transcript is corrected with a local replacement dictionary.
 5. Final text is inserted into the currently focused text cursor.
-6. Detailed voice/refiner state is emitted into app logs (`voice_input_*` / `voice_refiner_*`).
+6. Detailed voice/dictionary state is emitted into app logs (`voice_input_*` / `voice_dictionary_*`).
+
+### Voice replacement dictionary (`voice-word-replacements.json`)
+
+Dictionary file format is a JSON map:
+
+- key: the **correct** word/phrase
+- value: a list of **possible incorrect** words/phrases
+
+Example:
+
+```json
+{
+  "Emacs": ["IMAX", "E max", "emax"],
+  "Clojure": ["Closer", "Cello"],
+  "JSON": ["jason", "杰森"],
+  "Logseq": ["log seek", "log six", "Log萨克"]
+}
+```
+
+Runtime dictionary resolution order:
+
+1. `PS_CONTROLLER_WORD_REPLACEMENTS_PATH` (if set)
+2. App bundle resource: `Contents/Resources/voice-word-replacements.json`
+3. Current working directory: `./voice-word-replacements.json`
+4. Built-in fallback dictionary (if no external file is found)
 
 Notes:
 
@@ -129,10 +148,8 @@ Notes:
 - `voiceInput.asrServer.apiKey` must match the server Bearer token.
 - Set `voiceInput.asrServer.autoStart=true` if you want app-managed server startup.
 - When `autoStart=true`, the app uses a fixed API key: `ps-controller-mlx-qwen3-asr` for both server launch and client requests.
-- `voiceInput.asrServer.launchExecutable` and `launchArguments` control how the app launches the server process.
+- `voiceInput.asrServer.launchExecutable` and `launchArguments` control how the app launches the server process (default includes `--job-ttl 120` to keep job state for 2 minutes).
 - This project intentionally uses the `mlx-qwen3-asr` **HTTP server mode**, not per-request CLI transcription mode, to avoid model reload on every transcription.
-- `llmRefiner.baseURL` should point to your local Ollama server root URL (the app calls `POST /api/chat`).
-- On refinement failure or timeout, the app falls back to the original transcript automatically.
 - Startup dependency issues (missing command/config/service) are shown in the menu bar dropdown under `Dependencies`.
 
 If auto-start fails (missing executable/permission/invalid args), the issue is shown under menu bar `Dependencies` and you can fall back to manual startup.
@@ -141,14 +158,7 @@ Prepare local `mlx-qwen3-asr` server:
 
 ```bash
 pip install "mlx-qwen3-asr[serve]"
-mlx-qwen3-asr serve --api-key ps-controller-mlx-qwen3-asr
-```
-
-If you also enable `llmRefiner`, prepare local Ollama:
-
-```bash
-ollama pull gemma4:26b
-ollama serve
+mlx-qwen3-asr serve --api-key ps-controller-mlx-qwen3-asr --job-ttl 120
 ```
 
 ### Left thumbstick wheel (6 slots)

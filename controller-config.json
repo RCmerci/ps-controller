@@ -21,28 +21,28 @@
       "command": "echo 'Configure script for buttonOptions'"
     },
     "buttonX": {
-      "name": "buttonX",
-      "command": "echo 'Configure script for buttonX'"
+      "name": "Delete Backward",
+      "command": "osascript -e 'tell application \"System Events\" to key code 51'"
     },
     "buttonY": {
       "name": "Ctrl-A then Ctrl-K",
       "command": "osascript -e 'tell application \"System Events\" to keystroke \"a\" using control down' -e 'delay 0.05' -e 'tell application \"System Events\" to keystroke \"k\" using control down'"
     },
     "dpadDown": {
-      "name": "dpadDown",
-      "command": "echo 'Configure script for dpadDown'"
+      "name": "Emacs ECA Chat Reset",
+      "command": "__front_app=\"$(osascript -e 'tell application \"System Events\" to name of first process whose frontmost is true')\"; echo \"[dpadDown] front_app=${__front_app}\"; test \"${__front_app#Emacs}\" != \"$__front_app\" || echo \"[dpadDown] skip_not_emacs\"; test \"${__front_app#Emacs}\" != \"$__front_app\" && \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(let* ((win (selected-window)) (buf (and (window-live-p win) (window-buffer win))) (mode (and (buffer-live-p buf) (buffer-local-value (quote major-mode) buf)))) (if (or (eq mode (quote eca-chat)) (eq mode (quote eca-chat-mode))) (progn (with-current-buffer buf (eca-chat-reset)) (format \"action_executed mode=%s buffer=%s\" mode (if buf (buffer-name buf) \"nil\"))) (format \"skip_non_eca_mode mode=%s buffer=%s\" mode (if buf (buffer-name buf) \"nil\"))))'; __run_status=$?; echo \"[dpadDown] gate_or_run_status=${__run_status}\""
     },
     "dpadLeft": {
-      "name": "dpadLeft",
-      "command": "echo 'Configure script for dpadLeft'"
+      "name": "Emacs Tab Prev + Bottom",
+      "command": "__front_app=\"$(osascript -e 'tell application \"System Events\" to name of first process whose frontmost is true')\"; echo \"[dpadLeft] front_app=${__front_app}\"; test \"${__front_app#Emacs}\" != \"$__front_app\" || echo \"[dpadLeft] skip_not_emacs\"; test \"${__front_app#Emacs}\" != \"$__front_app\" && \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(let* ((win (selected-window)) (buf (and (window-live-p win) (window-buffer win))) (mode (and (buffer-live-p buf) (buffer-local-value (quote major-mode) buf)))) (if (or (eq mode (quote eca-chat)) (eq mode (quote eca-chat-mode))) (progn (with-selected-window win (tab-line-switch-to-prev-tab) (goto-char (point-max))) (let* ((new-buf (window-buffer win)) (new-mode (and (buffer-live-p new-buf) (buffer-local-value (quote major-mode) new-buf)))) (format \"action_executed mode=%s new_mode=%s buffer=%s\" mode new-mode (if new-buf (buffer-name new-buf) \"nil\")))) (format \"skip_non_eca_mode mode=%s buffer=%s\" mode (if buf (buffer-name buf) \"nil\"))))'; __run_status=$?; echo \"[dpadLeft] gate_or_run_status=${__run_status}\""
     },
     "dpadRight": {
-      "name": "dpadRight",
-      "command": "echo 'Configure script for dpadRight'"
+      "name": "Emacs Tab Next + Bottom",
+      "command": "__front_app=\"$(osascript -e 'tell application \"System Events\" to name of first process whose frontmost is true')\"; echo \"[dpadRight] front_app=${__front_app}\"; test \"${__front_app#Emacs}\" != \"$__front_app\" || echo \"[dpadRight] skip_not_emacs\"; test \"${__front_app#Emacs}\" != \"$__front_app\" && \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(let* ((win (selected-window)) (buf (and (window-live-p win) (window-buffer win))) (mode (and (buffer-live-p buf) (buffer-local-value (quote major-mode) buf)))) (if (or (eq mode (quote eca-chat)) (eq mode (quote eca-chat-mode))) (progn (with-selected-window win (tab-line-switch-to-next-tab) (goto-char (point-max))) (let* ((new-buf (window-buffer win)) (new-mode (and (buffer-live-p new-buf) (buffer-local-value (quote major-mode) new-buf)))) (format \"action_executed mode=%s new_mode=%s buffer=%s\" mode new-mode (if new-buf (buffer-name new-buf) \"nil\")))) (format \"skip_non_eca_mode mode=%s buffer=%s\" mode (if buf (buffer-name buf) \"nil\"))))'; __run_status=$?; echo \"[dpadRight] gate_or_run_status=${__run_status}\""
     },
     "dpadUp": {
-      "name": "dpadUp",
-      "command": "echo 'Configure script for dpadUp'"
+      "name": "Emacs ECA Chat New",
+      "command": "__front_app=\"$(osascript -e 'tell application \"System Events\" to name of first process whose frontmost is true')\"; echo \"[dpadUp] front_app=${__front_app}\"; test \"${__front_app#Emacs}\" != \"$__front_app\" || echo \"[dpadUp] skip_not_emacs\"; test \"${__front_app#Emacs}\" != \"$__front_app\" && \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(let* ((win (selected-window)) (buf (and (window-live-p win) (window-buffer win))) (mode (and (buffer-live-p buf) (buffer-local-value (quote major-mode) buf)))) (if (or (eq mode (quote eca-chat)) (eq mode (quote eca-chat-mode))) (progn (with-selected-window win (eca-chat-new)) (let* ((new-buf (window-buffer win)) (new-mode (and (buffer-live-p new-buf) (buffer-local-value (quote major-mode) new-buf)))) (format \"action_executed mode=%s new_mode=%s buffer=%s\" mode new-mode (if new-buf (buffer-name new-buf) \"nil\")))) (format \"skip_non_eca_mode mode=%s buffer=%s\" mode (if buf (buffer-name buf) \"nil\"))))'; __run_status=$?; echo \"[dpadUp] gate_or_run_status=${__run_status}\""
     },
     "leftShoulder": {
       "name": "leftShoulder",
@@ -80,14 +80,10 @@
       "autoStart": true,
       "launchExecutable": "mlx-qwen3-asr",
       "launchArguments": [
-        "serve"
+        "serve",
+        "--job-ttl",
+        "120"
       ]
-    },
-    "llmRefiner": {
-      "enabled": false,
-      "baseURL": "http://127.0.0.1:11434",
-      "model": "gemma4:26b",
-      "timeoutSeconds": 15
     }
   },
   "leftThumbstickWheel": {
@@ -97,7 +93,7 @@
         "title": "Emacs eca-chat-mode",
         "script": {
           "name": "switch-emacs-eca-chat-mode",
-          "command": "osascript -e 'tell application \"Emacs\" to activate'; \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(catch (quote done) (dolist (b (buffer-list)) (with-current-buffer b (when (or (eq major-mode (quote eca-chat)) (eq major-mode (quote eca-chat-mode))) (switch-to-buffer b) (goto-char (point-max)) (recenter -1) (throw (quote done) t)))) nil)'"
+          "command": "osascript -e 'tell application \"Emacs\" to activate'; \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(catch (quote done) (dolist (b (buffer-list)) (with-current-buffer b (when (or (eq major-mode (quote eca-chat)) (eq major-mode (quote eca-chat-mode))) (switch-to-buffer b) (goto-char (point-max)) (throw (quote done) t)))) nil)'"
         }
       },
       {

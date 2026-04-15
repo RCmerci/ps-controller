@@ -82,7 +82,7 @@ struct VoiceInputASRServerConfiguration: Codable, Equatable {
         timeoutSeconds: TimeInterval = 30,
         autoStart: Bool = false,
         launchExecutable: String = "mlx-qwen3-asr",
-        launchArguments: [String] = ["serve"]
+        launchArguments: [String] = ["serve", "--job-ttl", "120"]
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -140,63 +140,25 @@ struct VoiceInputASRServerConfiguration: Codable, Equatable {
     }
 }
 
-struct VoiceInputLLMRefinerConfiguration: Codable, Equatable {
-    let enabled: Bool
-    let baseURL: String
-    let model: String
-    let timeoutSeconds: TimeInterval
-
-    init(
-        enabled: Bool = true,
-        baseURL: String = "http://127.0.0.1:11434",
-        model: String = "gemma4:26b",
-        timeoutSeconds: TimeInterval = 8
-    ) {
-        self.enabled = enabled
-        self.baseURL = baseURL
-        self.model = model
-        self.timeoutSeconds = timeoutSeconds
-    }
-
-    static let `default` = VoiceInputLLMRefinerConfiguration()
-
-    func normalizedForRuntime() -> VoiceInputLLMRefinerConfiguration {
-        let normalizedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedTimeout = min(max(timeoutSeconds, 1), 60)
-
-        return VoiceInputLLMRefinerConfiguration(
-            enabled: enabled,
-            baseURL: normalizedBaseURL.isEmpty ? Self.default.baseURL : normalizedBaseURL,
-            model: normalizedModel.isEmpty ? Self.default.model : normalizedModel,
-            timeoutSeconds: normalizedTimeout
-        )
-    }
-}
-
 struct VoiceInputConfiguration: Codable, Equatable {
     let enabled: Bool
     let activationButton: ControllerButton
     let asrServer: VoiceInputASRServerConfiguration
-    let llmRefiner: VoiceInputLLMRefinerConfiguration
 
     private enum CodingKeys: String, CodingKey {
         case enabled
         case activationButton
         case asrServer
-        case llmRefiner
     }
 
     init(
         enabled: Bool = false,
         activationButton: ControllerButton = .buttonOptions,
-        asrServer: VoiceInputASRServerConfiguration = .default,
-        llmRefiner: VoiceInputLLMRefinerConfiguration = .default
+        asrServer: VoiceInputASRServerConfiguration = .default
     ) {
         self.enabled = enabled
         self.activationButton = activationButton
         self.asrServer = asrServer
-        self.llmRefiner = llmRefiner
     }
 
     init(from decoder: Decoder) throws {
@@ -204,7 +166,6 @@ struct VoiceInputConfiguration: Codable, Equatable {
         self.enabled = try container.decode(Bool.self, forKey: .enabled)
         self.activationButton = try container.decode(ControllerButton.self, forKey: .activationButton)
         self.asrServer = try container.decodeIfPresent(VoiceInputASRServerConfiguration.self, forKey: .asrServer) ?? .default
-        self.llmRefiner = try container.decodeIfPresent(VoiceInputLLMRefinerConfiguration.self, forKey: .llmRefiner) ?? .default
     }
 
     func encode(to encoder: Encoder) throws {
@@ -212,15 +173,13 @@ struct VoiceInputConfiguration: Codable, Equatable {
         try container.encode(enabled, forKey: .enabled)
         try container.encode(activationButton, forKey: .activationButton)
         try container.encode(asrServer, forKey: .asrServer)
-        try container.encode(llmRefiner, forKey: .llmRefiner)
     }
 
     func normalizedForRuntime() -> VoiceInputConfiguration {
         VoiceInputConfiguration(
             enabled: enabled,
             activationButton: activationButton,
-            asrServer: asrServer.normalizedForRuntime(),
-            llmRefiner: llmRefiner.normalizedForRuntime()
+            asrServer: asrServer.normalizedForRuntime()
         )
     }
 }
