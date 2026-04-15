@@ -1,0 +1,131 @@
+{
+  "buttons": {
+    "buttonA": {
+      "name": "Press Enter",
+      "command": "osascript -e 'tell application \"System Events\" to key code 36'"
+    },
+    "buttonB": {
+      "name": "Press Right Command Twice",
+      "command": "osascript -e 'tell application \"System Events\" to key code 54' -e 'delay 0.2' -e 'tell application \"System Events\" to key code 54'"
+    },
+    "buttonHome": {
+      "name": "buttonHome",
+      "command": "echo 'Configure script for buttonHome'"
+    },
+    "buttonMenu": {
+      "name": "buttonMenu",
+      "command": "echo 'Configure script for buttonMenu'"
+    },
+    "buttonOptions": {
+      "name": "buttonOptions",
+      "command": "echo 'Configure script for buttonOptions'"
+    },
+    "buttonX": {
+      "name": "buttonX",
+      "command": "echo 'Configure script for buttonX'"
+    },
+    "buttonY": {
+      "name": "Ctrl-A then Ctrl-K",
+      "command": "osascript -e 'tell application \"System Events\" to keystroke \"a\" using control down' -e 'delay 0.05' -e 'tell application \"System Events\" to keystroke \"k\" using control down'"
+    },
+    "dpadDown": {
+      "name": "dpadDown",
+      "command": "echo 'Configure script for dpadDown'"
+    },
+    "dpadLeft": {
+      "name": "dpadLeft",
+      "command": "echo 'Configure script for dpadLeft'"
+    },
+    "dpadRight": {
+      "name": "dpadRight",
+      "command": "echo 'Configure script for dpadRight'"
+    },
+    "dpadUp": {
+      "name": "dpadUp",
+      "command": "echo 'Configure script for dpadUp'"
+    },
+    "leftShoulder": {
+      "name": "leftShoulder",
+      "command": "echo 'Configure script for leftShoulder'"
+    },
+    "leftThumbstickButton": {
+      "name": "leftThumbstickButton",
+      "command": "echo 'Configure script for leftThumbstickButton'"
+    },
+    "leftTrigger": {
+      "name": "leftTrigger",
+      "command": "echo 'Configure script for leftTrigger'"
+    },
+    "rightShoulder": {
+      "name": "Press Ctrl-Enter",
+      "command": "osascript -e 'tell application \"System Events\" to key code 36 using control down'"
+    },
+    "rightThumbstickButton": {
+      "name": "rightThumbstickButton",
+      "command": "echo 'Configure script for rightThumbstickButton'"
+    },
+    "rightTrigger": {
+      "name": "rightTrigger",
+      "command": "echo 'Configure script for rightTrigger'"
+    }
+  },
+  "voiceInput": {
+    "enabled": true,
+    "activationButton": "buttonB",
+    "asrServer": {
+      "baseURL": "http://127.0.0.1:8765",
+      "apiKey": "ps-controller-mlx-qwen3-asr",
+      "model": "Qwen/Qwen3-ASR-0.6B",
+      "timeoutSeconds": 30,
+      "autoStart": true,
+      "launchExecutable": "mlx-qwen3-asr",
+      "launchArguments": [
+        "serve"
+      ]
+    },
+    "llmRefiner": {
+      "enabled": false,
+      "baseURL": "http://127.0.0.1:11434",
+      "model": "gemma4:26b",
+      "timeoutSeconds": 15
+    }
+  },
+  "leftThumbstickWheel": {
+    "activationThreshold": 0.45,
+    "slots": [
+      {
+        "title": "Emacs eca-chat-mode",
+        "script": {
+          "name": "switch-emacs-eca-chat-mode",
+          "command": "osascript -e 'tell application \"Emacs\" to activate'; \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(catch (quote done) (dolist (b (buffer-list)) (with-current-buffer b (when (or (eq major-mode (quote eca-chat)) (eq major-mode (quote eca-chat-mode))) (switch-to-buffer b) (goto-char (point-max)) (recenter -1) (throw (quote done) t)))) nil)'"
+        }
+      },
+      {
+        "title": "Chrome test.logseq.com",
+        "script": {
+          "name": "switch-chrome-test-logseq",
+          "command": "osascript -e 'tell application \"Google Chrome\" to activate' -e 'tell application \"Google Chrome\"' -e 'repeat with w in windows' -e 'set i to 1' -e 'repeat with t in tabs of w' -e 'if (URL of t contains \"test.logseq.com\") then' -e 'set active tab index of w to i' -e 'set index of w to 1' -e 'return' -e 'end if' -e 'set i to i + 1' -e 'end repeat' -e 'end repeat' -e 'end tell'"
+        }
+      },
+      {
+        "title": "Logseq Eshell Upsert",
+        "script": {
+          "name": "emacs-eshell-logseq-upsert-block",
+          "command": "osascript -e 'tell application \"Emacs\" to activate'; \"/Applications/Emacs 2.app/Contents/MacOS/bin-arm64-11/emacsclient\" -n --eval '(let ((target (get-buffer \"logseq-eshell\"))) (if target (switch-to-buffer target) (progn (eshell) (rename-buffer \"logseq-eshell\" t))) (goto-char (point-max)) (unless (bolp) (insert \"\\n\")) (insert \"logseq upsert block -g demo -c \" (string 39) (string 39)) (backward-char 1))'"
+        }
+      },
+      {
+        "title": "Slot 4",
+        "script": null
+      },
+      {
+        "title": "Slot 5",
+        "script": null
+      },
+      {
+        "title": "Cancel",
+        "script": null
+      }
+    ]
+  }
+}
