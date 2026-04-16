@@ -118,11 +118,11 @@ You can enable controller-triggered voice transcription with `voiceInput`:
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
       "apiKey": "",
-      "model": "Qwen/Qwen3-ASR-0.6B",
+      "model": "Qwen/Qwen3-ASR-1.7B",
       "timeoutSeconds": 30,
       "autoStart": true,
       "launchExecutable": "/Users/rcmerci/qwen3_asr_rs/asr-server",
-      "launchArguments": ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"]
+      "launchArguments": ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-1.7B"]
     }
   }
 }
@@ -182,7 +182,7 @@ Prepare local `qwen3-asr-rs` server:
 
 ```bash
 "/Users/rcmerci/qwen3_asr_rs/asr-server" \
-  --model-dir "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B" \
+  --model-dir "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-1.7B" \
   --host 127.0.0.1 \
   --port 8765
 ```

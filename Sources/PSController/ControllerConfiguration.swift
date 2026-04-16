@@ -115,11 +115,11 @@ struct VoiceInputASRServerConfiguration: Codable, Equatable {
     init(
         baseURL: String = "http://127.0.0.1:8765",
         apiKey: String = "",
-        model: String = "Qwen/Qwen3-ASR-0.6B",
+        model: String = "Qwen/Qwen3-ASR-1.7B",
         timeoutSeconds: TimeInterval = 30,
         autoStart: Bool = false,
         launchExecutable: String = "/Users/rcmerci/qwen3_asr_rs/asr-server",
-        launchArguments: [String] = ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"]
+        launchArguments: [String] = ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-1.7B"]
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey

@@ -284,7 +284,7 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.voiceInput?.asrServer, .default)
         XCTAssertEqual(decoded.voiceInput?.asrServer.autoStart, false)
         XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "/Users/rcmerci/qwen3_asr_rs/asr-server")
-        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"])
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-1.7B"])
     }
 
     func testControllerConfigurationDecodesVoiceInputASRServerConfiguration() throws {
@@ -429,7 +429,7 @@ final class ControllerManagerTests: XCTestCase {
                 asrServer: VoiceInputASRServerConfiguration(
                     baseURL: "http://127.0.0.1:8765",
                     apiKey: "abc",
-                    model: "Qwen/Qwen3-ASR-0.6B",
+                    model: "Qwen/Qwen3-ASR-1.7B",
                     timeoutSeconds: 20
                 )
             )

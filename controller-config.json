@@ -83,13 +83,13 @@
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
       "apiKey": "",
-      "model": "Qwen/Qwen3-ASR-0.6B",
+      "model": "Qwen/Qwen3-ASR-1.7B",
       "timeoutSeconds": 30,
       "autoStart": true,
       "launchExecutable": "/Users/rcmerci/qwen3_asr_rs/asr-server",
       "launchArguments": [
         "--model-dir",
-        "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"
+        "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-1.7B"
       ]
     }
   },
