@@ -57,6 +57,16 @@ struct LeftThumbstickWheelConfiguration: Codable, Equatable {
     }
 }
 
+struct RightThumbstickWheelConfiguration: Codable, Equatable {
+    let activationThreshold: Float
+    let slots: [ThumbstickWheelSlot]
+
+    init(activationThreshold: Float, slots: [ThumbstickWheelSlot]) {
+        self.activationThreshold = activationThreshold
+        self.slots = slots
+    }
+}
+
 struct TouchpadConfiguration: Codable, Equatable {
     let pointerSensitivity: Float
     let scrollSensitivity: Float
@@ -226,12 +236,14 @@ struct ControllerConfiguration: Codable, Equatable {
 
     let buttons: [ControllerButton: ScriptBinding]
     let leftThumbstickWheel: LeftThumbstickWheelConfiguration
+    let rightThumbstickWheel: RightThumbstickWheelConfiguration
     let voiceInput: VoiceInputConfiguration?
     let touchpad: TouchpadConfiguration
 
     private enum CodingKeys: String, CodingKey {
         case buttons
         case leftThumbstickWheel
+        case rightThumbstickWheel
         case voiceInput
         case touchpad
     }
@@ -239,11 +251,22 @@ struct ControllerConfiguration: Codable, Equatable {
     init(
         buttons: [ControllerButton: ScriptBinding],
         leftThumbstickWheel: LeftThumbstickWheelConfiguration,
+        rightThumbstickWheel: RightThumbstickWheelConfiguration = RightThumbstickWheelConfiguration(
+            activationThreshold: 0.45,
+            slots: [
+                ThumbstickWheelSlot(title: "Slot 1", script: ScriptBinding(name: "slot-1", command: "echo 'slot-1'")),
+                ThumbstickWheelSlot(title: "Slot 2", script: ScriptBinding(name: "slot-2", command: "echo 'slot-2'")),
+                ThumbstickWheelSlot(title: "Slot 3", script: ScriptBinding(name: "slot-3", command: "echo 'slot-3'")),
+                ThumbstickWheelSlot(title: "Slot 4", script: ScriptBinding(name: "slot-4", command: "echo 'slot-4'")),
+                ThumbstickWheelSlot(title: "Cancel", script: nil)
+            ]
+        ),
         voiceInput: VoiceInputConfiguration? = nil,
         touchpad: TouchpadConfiguration = .default
     ) {
         self.buttons = buttons
         self.leftThumbstickWheel = leftThumbstickWheel
+        self.rightThumbstickWheel = rightThumbstickWheel
         self.voiceInput = voiceInput
         self.touchpad = touchpad
     }
@@ -266,6 +289,8 @@ struct ControllerConfiguration: Codable, Equatable {
         }
 
         self.leftThumbstickWheel = try container.decode(LeftThumbstickWheelConfiguration.self, forKey: .leftThumbstickWheel)
+        self.rightThumbstickWheel = try container.decodeIfPresent(RightThumbstickWheelConfiguration.self, forKey: .rightThumbstickWheel)
+            ?? Self.default.rightThumbstickWheel
         self.voiceInput = try container.decodeIfPresent(VoiceInputConfiguration.self, forKey: .voiceInput)
         self.touchpad = try container.decodeIfPresent(TouchpadConfiguration.self, forKey: .touchpad) ?? .default
     }
@@ -276,6 +301,7 @@ struct ControllerConfiguration: Codable, Equatable {
         let stringKeyedButtons = Dictionary(uniqueKeysWithValues: buttons.map { ($0.key.rawValue, $0.value) })
         try container.encode(stringKeyedButtons, forKey: .buttons)
         try container.encode(leftThumbstickWheel, forKey: .leftThumbstickWheel)
+        try container.encode(rightThumbstickWheel, forKey: .rightThumbstickWheel)
         try container.encodeIfPresent(voiceInput, forKey: .voiceInput)
         try container.encode(touchpad, forKey: .touchpad)
     }
@@ -292,19 +318,35 @@ struct ControllerConfiguration: Codable, Equatable {
                 ThumbstickWheelSlot(title: "Cancel", script: nil)
             ]
         ),
+        rightThumbstickWheel: RightThumbstickWheelConfiguration(
+            activationThreshold: 0.45,
+            slots: [
+                ThumbstickWheelSlot(title: "Slot 1", script: ScriptBinding(name: "slot-1", command: "echo 'slot-1'")),
+                ThumbstickWheelSlot(title: "Slot 2", script: ScriptBinding(name: "slot-2", command: "echo 'slot-2'")),
+                ThumbstickWheelSlot(title: "Slot 3", script: ScriptBinding(name: "slot-3", command: "echo 'slot-3'")),
+                ThumbstickWheelSlot(title: "Slot 4", script: ScriptBinding(name: "slot-4", command: "echo 'slot-4'")),
+                ThumbstickWheelSlot(title: "Cancel", script: nil)
+            ]
+        ),
         voiceInput: VoiceInputConfiguration(enabled: false, activationButton: .buttonOptions),
         touchpad: .default
     )
 
     func normalizedForRuntime() -> ControllerConfiguration {
-        let slots = normalizedWheelSlots(leftThumbstickWheel.slots)
-        let threshold = min(max(leftThumbstickWheel.activationThreshold, 0.1), 0.95)
+        let leftSlots = normalizedWheelSlots(leftThumbstickWheel.slots)
+        let leftThreshold = min(max(leftThumbstickWheel.activationThreshold, 0.1), 0.95)
+        let rightSlots = normalizedWheelSlots(rightThumbstickWheel.slots)
+        let rightThreshold = min(max(rightThumbstickWheel.activationThreshold, 0.1), 0.95)
 
         return ControllerConfiguration(
             buttons: buttons,
             leftThumbstickWheel: LeftThumbstickWheelConfiguration(
-                activationThreshold: threshold,
-                slots: slots
+                activationThreshold: leftThreshold,
+                slots: leftSlots
+            ),
+            rightThumbstickWheel: RightThumbstickWheelConfiguration(
+                activationThreshold: rightThreshold,
+                slots: rightSlots
             ),
             voiceInput: voiceInput?.normalizedForRuntime(),
             touchpad: touchpad.normalizedForRuntime()

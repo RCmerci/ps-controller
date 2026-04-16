@@ -11,6 +11,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dependencyStatusItem: NSMenuItem?
     private var dependencyDetailItems: [NSMenuItem] = []
     private var toggleControlItem: NSMenuItem?
+    private var restartASRServerItem: NSMenuItem?
+
+    private var isRestartingASRServer = false {
+        didSet {
+            guard let restartASRServerItem else { return }
+            restartASRServerItem.isEnabled = !isRestartingASRServer
+            restartASRServerItem.title = isRestartingASRServer ? "Restarting ASR Server..." : "Restart ASR Server"
+        }
+    }
 
     private var batteryPollingTimer: DispatchSourceTimer?
     private var latestConnectionState: ControllerConnectionState = .disconnected
@@ -77,6 +86,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle.target = self
         menu.addItem(toggle)
         self.toggleControlItem = toggle
+
+        let restartASRServerMenuItem = NSMenuItem(title: "Restart ASR Server", action: #selector(restartASRServer), keyEquivalent: "r")
+        restartASRServerMenuItem.target = self
+        menu.addItem(restartASRServerMenuItem)
+        self.restartASRServerItem = restartASRServerMenuItem
+
+        menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
@@ -219,6 +235,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc
     private func toggleControl() {
         isControlEnabled.toggle()
+    }
+
+    @objc
+    private func restartASRServer() {
+        guard !isRestartingASRServer else { return }
+
+        isRestartingASRServer = true
+        updateDependencyMenu(["Checking runtime dependencies..."])
+
+        AppFileLogger.shared.info(category: "AppDelegate", "menu_restart_asr_requested")
+        print("[AppDelegate] menu_restart_asr_requested")
+
+        controllerManager.restartASRServerEnsuringHealthy { [weak self] success, message in
+            guard let self else { return }
+
+            self.isRestartingASRServer = false
+
+            if success {
+                AppFileLogger.shared.info(category: "AppDelegate", "menu_restart_asr_succeeded message=\(message)")
+                print("[AppDelegate] menu_restart_asr_succeeded message=\(message)")
+            } else {
+                AppFileLogger.shared.error(category: "AppDelegate", "menu_restart_asr_failed message=\(message)")
+                print("[AppDelegate] menu_restart_asr_failed message=\(message)")
+                self.updateDependencyMenu([message])
+            }
+        }
     }
 
     @objc

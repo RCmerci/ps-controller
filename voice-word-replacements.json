@@ -25,7 +25,9 @@
     "log seek",
     "log six",
     "Log萨克",
-    "logsec"
+    "logsec",
+    "logback",
+    "logstack"
   ],
   "Python": [
     "配森",

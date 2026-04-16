@@ -28,6 +28,7 @@ extension VoiceInputControlling {
 
 final class Qwen3ASRVoiceInputController: VoiceInputControlling {
     var onTranscript: ((VoiceTranscriptEvent) -> Void)?
+    var onASRServerRecoveryRequested: ((@escaping (Bool, String) -> Void) -> Void)?
 
     private struct CaptureContext {
         let id: UUID
@@ -56,6 +57,13 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
 
     private var currentTranscriptionTask: URLSessionDataTask?
     private var currentTranscriptionID: UUID?
+
+    private static let maxTranscriptionAttempts = 2
+    private static let recoverableNetworkErrorCodes: Set<Int> = [
+        NSURLErrorNetworkConnectionLost,
+        NSURLErrorCannotConnectToHost,
+        NSURLErrorTimedOut
+    ]
 
     init(
         logger: Logger = Logger(subsystem: "PSController", category: "VoiceInput"),
@@ -124,15 +132,41 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         inputNode.removeTap(onBus: 0)
 
         let inputFormat = inputNode.outputFormat(forBus: 0)
+        let targetCaptureSettings = makeCaptureFileSettings()
+
         logInfo("voice_audio_input_format channels=\(inputFormat.channelCount) sampleRate=\(inputFormat.sampleRate) interleaved=\(inputFormat.isInterleaved)")
+        logInfo("voice_audio_target_format channels=1 sampleRate=16000 bitDepth=16 encoding=pcm_wav")
 
         do {
-            let audioFile = try AVAudioFile(forWriting: captureFileURL, settings: inputFormat.settings)
+            let audioFile = try AVAudioFile(
+                forWriting: captureFileURL,
+                settings: targetCaptureSettings,
+                commonFormat: .pcmFormatInt16,
+                interleaved: false
+            )
+
+            let outputFormat = audioFile.processingFormat
+            guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+                cleanupCaptureArtifacts(fileURL: captureFileURL)
+                currentAudioFile = nil
+                logError("voice_start_failed reason=audio_converter_init_failed trigger=\(trigger)")
+                return
+            }
+
             currentAudioFile = audioFile
 
             inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
                 guard let self else { return }
-                try? self.currentAudioFile?.write(from: buffer)
+
+                guard let convertedBuffer = self.convertCapturedBuffer(buffer, converter: converter, outputFormat: outputFormat) else {
+                    return
+                }
+
+                do {
+                    try self.currentAudioFile?.write(from: convertedBuffer)
+                } catch {
+                    self.logError("voice_capture_write_failed captureID=\(captureID.uuidString) message=\(error.localizedDescription)")
+                }
             }
 
             audioEngine.prepare()
@@ -229,6 +263,26 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         let requestID = UUID()
         currentTranscriptionID = requestID
 
+        submitTranscriptionRequest(
+            requestID: requestID,
+            attempt: 1,
+            capture: capture,
+            endpointURL: endpointURL,
+            audioData: audioData,
+            languageCode: languageCode,
+            asrServer: asrServer
+        )
+    }
+
+    private func submitTranscriptionRequest(
+        requestID: UUID,
+        attempt: Int,
+        capture: CaptureContext,
+        endpointURL: URL,
+        audioData: Data,
+        languageCode: String?,
+        asrServer: VoiceInputASRServerConfiguration
+    ) {
         let request = buildTranscriptionRequest(
             endpointURL: endpointURL,
             audioData: audioData,
@@ -237,7 +291,7 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             asrServer: asrServer
         )
 
-        logInfo("voice_transcription_request_start requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) endpoint=\(endpointURL.absoluteString) api=openai_compatible model=\(asrServer.model) language=\(languageCode ?? "auto") bytes=\(audioData.count)")
+        logInfo("voice_transcription_request_start requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) endpoint=\(endpointURL.absoluteString) api=openai_compatible model=\(asrServer.model) language=\(languageCode ?? "auto") bytes=\(audioData.count)")
 
         let task = urlSession.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
@@ -245,7 +299,12 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             self.queue.async {
                 self.handleTranscriptionResponse(
                     requestID: requestID,
+                    attempt: attempt,
                     capture: capture,
+                    endpointURL: endpointURL,
+                    audioData: audioData,
+                    languageCode: languageCode,
+                    asrServer: asrServer,
                     responseData: data,
                     response: response,
                     error: error
@@ -259,65 +318,159 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
 
     private func handleTranscriptionResponse(
         requestID: UUID,
+        attempt: Int,
         capture: CaptureContext,
+        endpointURL: URL,
+        audioData: Data,
+        languageCode: String?,
+        asrServer: VoiceInputASRServerConfiguration,
         responseData: Data?,
         response: URLResponse?,
         error: Error?
     ) {
-        defer {
-            cleanupCaptureArtifacts(fileURL: capture.fileURL)
-            if currentTranscriptionID == requestID {
-                currentTranscriptionID = nil
-                currentTranscriptionTask = nil
-            }
-        }
-
         guard currentTranscriptionID == requestID else {
-            logDebug("voice_transcription_stale_response requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+            logDebug("voice_transcription_stale_response requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt)")
+            cleanupCaptureArtifacts(fileURL: capture.fileURL)
             return
         }
 
         if let error {
             let nsError = error as NSError
             if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
-                logDebug("voice_transcription_cancelled requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+                logDebug("voice_transcription_cancelled requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt)")
+                finalizeTranscriptionRequest(requestID: requestID, capture: capture)
                 return
             }
 
-            logError("voice_transcription_failed reason=network_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) message=\(error.localizedDescription)")
+            if shouldRecoverByRestartingASR(nsError: nsError, attempt: attempt) {
+                requestASRRecoveryAndRetry(
+                    requestID: requestID,
+                    attempt: attempt,
+                    capture: capture,
+                    endpointURL: endpointURL,
+                    audioData: audioData,
+                    languageCode: languageCode,
+                    asrServer: asrServer,
+                    nsError: nsError,
+                    originalError: error
+                )
+                return
+            }
+
+            logError("voice_transcription_failed reason=network_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) domain=\(nsError.domain) code=\(nsError.code) message=\(error.localizedDescription)")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
             return
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            logError("voice_transcription_failed reason=invalid_http_response requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+            logError("voice_transcription_failed reason=invalid_http_response requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt)")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
             return
         }
 
         let responseText = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         let rawResponseBody = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-        logInfo("voice_transcription_response_raw requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
+        logInfo("voice_transcription_response_raw requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            logError("voice_transcription_failed reason=http_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
+            logError("voice_transcription_failed reason=http_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
             return
         }
 
         guard let responseData,
               let payload = try? JSONDecoder().decode(OpenAITranscriptionResponse.self, from: responseData),
               let text = payload.text else {
-            logError("voice_transcription_failed reason=invalid_json_payload requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+            logError("voice_transcription_failed reason=invalid_json_payload requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt)")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
             return
         }
 
         let transcript = normalizeASRTranscriptText(text)
 
         guard !transcript.isEmpty else {
-            logInfo("voice_transcription_filtered requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) reason=missing_asr_text_marker_or_empty_payload")
+            logInfo("voice_transcription_filtered requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) reason=missing_asr_text_marker_or_empty_payload")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
             return
         }
 
         logInfo("voice_transcript final=true locale=\(capture.localeIdentifier ?? "auto") text=\(transcript)")
         onTranscript?(.init(text: transcript, isFinal: true))
+        finalizeTranscriptionRequest(requestID: requestID, capture: capture)
+    }
+
+    private func requestASRRecoveryAndRetry(
+        requestID: UUID,
+        attempt: Int,
+        capture: CaptureContext,
+        endpointURL: URL,
+        audioData: Data,
+        languageCode: String?,
+        asrServer: VoiceInputASRServerConfiguration,
+        nsError: NSError,
+        originalError: Error
+    ) {
+        guard let onASRServerRecoveryRequested else {
+            logError("voice_transcription_failed reason=restart_handler_missing requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) domain=\(nsError.domain) code=\(nsError.code) message=\(originalError.localizedDescription)")
+            finalizeTranscriptionRequest(requestID: requestID, capture: capture)
+            return
+        }
+
+        currentTranscriptionTask = nil
+
+        logInfo("voice_transcription_recovery_restart_requested requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) domain=\(nsError.domain) code=\(nsError.code)")
+
+        onASRServerRecoveryRequested { [weak self] success, message in
+            guard let self else { return }
+
+            self.queue.async {
+                guard self.currentTranscriptionID == requestID else {
+                    self.logDebug("voice_transcription_recovery_ignored_stale requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt)")
+                    self.cleanupCaptureArtifacts(fileURL: capture.fileURL)
+                    return
+                }
+
+                guard success else {
+                    self.logError("voice_transcription_recovery_restart_failed requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(attempt) message=\(message)")
+                    self.finalizeTranscriptionRequest(requestID: requestID, capture: capture)
+                    return
+                }
+
+                let nextAttempt = attempt + 1
+                self.logInfo("voice_transcription_retry_start requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) attempt=\(nextAttempt) recoveryMessage=\(message)")
+
+                self.submitTranscriptionRequest(
+                    requestID: requestID,
+                    attempt: nextAttempt,
+                    capture: capture,
+                    endpointURL: endpointURL,
+                    audioData: audioData,
+                    languageCode: languageCode,
+                    asrServer: asrServer
+                )
+            }
+        }
+    }
+
+    private func shouldRecoverByRestartingASR(nsError: NSError, attempt: Int) -> Bool {
+        guard attempt < Self.maxTranscriptionAttempts else {
+            return false
+        }
+
+        guard nsError.domain == NSURLErrorDomain else {
+            return false
+        }
+
+        return Self.recoverableNetworkErrorCodes.contains(nsError.code)
+    }
+
+    private func finalizeTranscriptionRequest(requestID: UUID, capture: CaptureContext) {
+        cleanupCaptureArtifacts(fileURL: capture.fileURL)
+
+        if currentTranscriptionID == requestID {
+            currentTranscriptionID = nil
+            currentTranscriptionTask = nil
+        }
     }
 
     private func cancelActiveTranscriptionLocked(reason: String) {
@@ -333,6 +486,67 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         fileManager.temporaryDirectory
             .appendingPathComponent("pscontroller-voice-\(captureID.uuidString)", isDirectory: false)
             .appendingPathExtension("wav")
+    }
+
+    private func makeCaptureFileSettings() -> [String: Any] {
+        [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+    }
+
+    private func convertCapturedBuffer(
+        _ inputBuffer: AVAudioPCMBuffer,
+        converter: AVAudioConverter,
+        outputFormat: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        guard inputBuffer.frameLength > 0 else {
+            return nil
+        }
+
+        let sampleRateRatio = outputFormat.sampleRate / inputBuffer.format.sampleRate
+        let scaledFrameCount = Double(inputBuffer.frameLength) * sampleRateRatio
+        let frameCapacity = AVAudioFrameCount(max(1, ceil(scaledFrameCount) + 16))
+
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCapacity) else {
+            logError("voice_capture_convert_failed reason=output_buffer_alloc_failed")
+            return nil
+        }
+
+        var conversionError: NSError?
+        var didProvideInput = false
+
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+            if didProvideInput {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+
+            didProvideInput = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        if let conversionError {
+            logError("voice_capture_convert_failed reason=converter_error message=\(conversionError.localizedDescription)")
+            return nil
+        }
+
+        switch status {
+        case .haveData, .inputRanDry, .endOfStream:
+            return outputBuffer.frameLength > 0 ? outputBuffer : nil
+        case .error:
+            logError("voice_capture_convert_failed reason=converter_status_error")
+            return nil
+        @unknown default:
+            logError("voice_capture_convert_failed reason=converter_status_unknown")
+            return nil
+        }
     }
 
     private func makeOpenAITranscriptionEndpointURL(baseURL: String) -> URL? {

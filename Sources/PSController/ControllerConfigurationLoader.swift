@@ -73,24 +73,24 @@ final class ControllerConfigurationLoader: ControllerConfigurationProviding {
             return (URL(fileURLWithPath: explicitConfigPath), .environmentOverride)
         }
 
-        if let bundledConfigURL = bundledConfigURL(),
-           fileManager.fileExists(atPath: bundledConfigURL.path) {
-            return (bundledConfigURL, .appBundleResource)
-        }
-
         if let workingDirectoryConfigURL = workingDirectoryConfigURL(),
            fileManager.fileExists(atPath: workingDirectoryConfigURL.path) {
             return (workingDirectoryConfigURL, .workingDirectory)
         }
 
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        if let bundledConfigURL = bundledConfigURL(),
+           fileManager.fileExists(atPath: bundledConfigURL.path) {
+            return (bundledConfigURL, .appBundleResource)
+        }
 
-        let appSupportConfigURL = appSupport
-            .appendingPathComponent("PSController", isDirectory: true)
-            .appendingPathComponent("controller-config.json", isDirectory: false)
+        if let workingDirectoryConfigURL = workingDirectoryConfigURL() {
+            return (workingDirectoryConfigURL, .workingDirectory)
+        }
 
-        return (appSupportConfigURL, .appSupport)
+        return (
+            URL(fileURLWithPath: "controller-config.json", relativeTo: fileManager.temporaryDirectory),
+            .workingDirectory
+        )
     }
 
     private func bundledConfigURL() -> URL? {
@@ -129,7 +129,6 @@ final class ControllerConfigurationLoader: ControllerConfigurationProviding {
         case environmentOverride = "env"
         case appBundleResource = "bundle"
         case workingDirectory = "cwd"
-        case appSupport = "app_support"
     }
 
     private func logInfo(_ message: String) {

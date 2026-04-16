@@ -126,5 +126,42 @@
         "script": null
       }
     ]
+  },
+  "rightThumbstickWheel": {
+    "activationThreshold": 0.45,
+    "slots": [
+      {
+        "title": "Slot 1",
+        "script": {
+          "name": "right-thumbstick-slot-1",
+          "command": "echo 'Configure script for rightThumbstick slot 1'"
+        }
+      },
+      {
+        "title": "Slot 2",
+        "script": {
+          "name": "right-thumbstick-slot-2",
+          "command": "echo 'Configure script for rightThumbstick slot 2'"
+        }
+      },
+      {
+        "title": "Slot 3",
+        "script": {
+          "name": "right-thumbstick-slot-3",
+          "command": "echo 'Configure script for rightThumbstick slot 3'"
+        }
+      },
+      {
+        "title": "Slot 4",
+        "script": {
+          "name": "right-thumbstick-slot-4",
+          "command": "echo 'Configure script for rightThumbstick slot 4'"
+        }
+      },
+      {
+        "title": "Cancel",
+        "script": null
+      }
+    ]
   }
 }

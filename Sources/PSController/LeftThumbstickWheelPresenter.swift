@@ -11,9 +11,9 @@ final class LeftThumbstickWheelPresenter: LeftThumbstickWheelPresenting {
     private let panel: NSPanel
     private let wheelView: LeftThumbstickWheelView
 
-    init(size: CGFloat = 360) {
+    init(size: CGFloat = 360, centerTitle: String = "Left Stick") {
         let frame = NSRect(x: 0, y: 0, width: size, height: size)
-        self.wheelView = LeftThumbstickWheelView(frame: frame)
+        self.wheelView = LeftThumbstickWheelView(frame: frame, centerTitle: centerTitle)
 
         self.panel = NSPanel(
             contentRect: frame,
@@ -67,8 +67,18 @@ final class LeftThumbstickWheelPresenter: LeftThumbstickWheelPresenting {
 }
 
 private final class LeftThumbstickWheelView: NSView {
+    private let centerTitle: String
     private var slots: [ThumbstickWheelSlot] = []
     private var selectedIndex: Int = 0
+
+    init(frame frameRect: NSRect, centerTitle: String) {
+        self.centerTitle = centerTitle
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
 
     func update(slots: [ThumbstickWheelSlot], selectedIndex: Int) {
         self.slots = slots
@@ -121,7 +131,6 @@ private final class LeftThumbstickWheelView: NSView {
         NSColor.black.withAlphaComponent(0.8).setFill()
         innerCircle.fill()
 
-        let centerTitle = "Left Stick"
         let centerAttributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.white.withAlphaComponent(0.9),
             .font: NSFont.systemFont(ofSize: 14, weight: .semibold)

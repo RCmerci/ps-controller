@@ -40,6 +40,7 @@ final class ControllerManager {
     private let configurationProvider: ControllerConfigurationProviding
     private let scriptExecutor: ScriptExecuting
     private let leftThumbstickWheelPresenter: LeftThumbstickWheelPresenting
+    private let rightThumbstickWheelPresenter: LeftThumbstickWheelPresenting
     private let controllerActionHintPresenter: ControllerActionHintPresenting
     private let voiceInputController: VoiceInputControlling
     private let textInputInjector: TextInputInjecting
@@ -49,8 +50,10 @@ final class ControllerManager {
 
     private var configuration: ControllerConfiguration = .default
 
-    private var isWheelVisible = false
-    private var selectedWheelSlotIndex: Int?
+    private var isLeftWheelVisible = false
+    private var selectedLeftWheelSlotIndex: Int?
+    private var isRightWheelVisible = false
+    private var selectedRightWheelSlotIndex: Int?
     private var isControllerActionHintVisible = false
     private var touchpadMoveActive = false
     private var touchpadWasTouching = false
@@ -92,6 +95,7 @@ final class ControllerManager {
         configurationProvider: ControllerConfigurationProviding = ControllerConfigurationLoader(),
         scriptExecutor: ScriptExecuting = ProcessScriptExecutor(),
         leftThumbstickWheelPresenter: LeftThumbstickWheelPresenting = LeftThumbstickWheelPresenter(),
+        rightThumbstickWheelPresenter: LeftThumbstickWheelPresenting = LeftThumbstickWheelPresenter(centerTitle: "Right Stick"),
         controllerActionHintPresenter: ControllerActionHintPresenting = ControllerActionHintPresenter(),
         voiceInputController: VoiceInputControlling = Qwen3ASRVoiceInputController(),
         textInputInjector: TextInputInjecting = CGEventTextInputInjector(),
@@ -104,6 +108,7 @@ final class ControllerManager {
         self.configurationProvider = configurationProvider
         self.scriptExecutor = scriptExecutor
         self.leftThumbstickWheelPresenter = leftThumbstickWheelPresenter
+        self.rightThumbstickWheelPresenter = rightThumbstickWheelPresenter
         self.controllerActionHintPresenter = controllerActionHintPresenter
         self.voiceInputController = voiceInputController
         self.textInputInjector = textInputInjector
@@ -117,6 +122,21 @@ final class ControllerManager {
         self.voiceInputController.updateConfiguration(self.configuration.voiceInput)
         self.voiceInputController.onTranscript = { [weak self] event in
             self?.handleVoiceTranscript(event)
+        }
+
+        if let qwenVoiceInputController = self.voiceInputController as? Qwen3ASRVoiceInputController {
+            qwenVoiceInputController.onASRServerRecoveryRequested = { [weak self] completion in
+                guard let self else {
+                    completion(false, "controller_manager_deallocated")
+                    return
+                }
+
+                self.logInfo("voice_transcription_recovery_restart_begin")
+                self.restartASRServerEnsuringHealthy(forceRestartUnmanagedRunningService: true) { success, message in
+                    self.logInfo("voice_transcription_recovery_restart_end success=\(success) message=\(message)")
+                    completion(success, message)
+                }
+            }
         }
     }
 
@@ -138,7 +158,7 @@ final class ControllerManager {
         let asrAPIKeyConfigured = !(configuration.voiceInput?.asrServer.apiKey.isEmpty ?? true)
         let asrAutoStart = configuration.voiceInput?.asrServer.autoStart ?? false
         let asrLaunchExecutable = configuration.voiceInput?.asrServer.launchExecutable ?? "none"
-        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) wheelSlots=\(configuration.leftThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=buttonB:zh-CN asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable)")
+        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) leftWheelSlots=\(configuration.leftThumbstickWheel.slots.count) rightWheelSlots=\(configuration.rightThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=buttonB:zh-CN asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable)")
 
         prepareVoiceInputIfNeeded()
 
@@ -162,13 +182,35 @@ final class ControllerManager {
     func setControlEnabled(_ enabled: Bool) {
         isControlEnabled = enabled
         if !enabled {
-            hideWheelIfVisible(reason: "control_paused")
+            hideWheelsIfVisible(reason: "control_paused")
             hideControllerActionHintIfVisible(reason: "control_paused")
             stopAllRepeatingButtons(reason: "control_paused")
             resetTouchpadState(reason: "control_paused")
             voiceInputController.stopCapture(trigger: "control_paused")
         }
         logInfo("Control enabled set to: \(enabled)")
+    }
+
+    func restartASRServerEnsuringHealthy(
+        forceRestartUnmanagedRunningService: Bool = false,
+        completion: ((Bool, String) -> Void)? = nil
+    ) {
+        let configSnapshot = configuration
+
+        dependencyCheckQueue.async { [weak self] in
+            guard let self else { return }
+
+            let result = self.restartASRServerEnsuringHealthyLocked(
+                configuration: configSnapshot,
+                forceRestartUnmanagedRunningService: forceRestartUnmanagedRunningService
+            )
+            self.runDependencyChecks()
+
+            guard let completion else { return }
+            DispatchQueue.main.async {
+                completion(result.success, result.message)
+            }
+        }
     }
 
     deinit {
@@ -203,7 +245,9 @@ final class ControllerManager {
         touchpadX: Float = 0,
         touchpadY: Float = 0,
         leftTrigger: Float,
-        rightTrigger: Float
+        rightTrigger: Float,
+        rightThumbstickX: Float = 0,
+        rightThumbstickY: Float = 0
     ) {
         guard isControlEnabled else { return }
 
@@ -211,6 +255,7 @@ final class ControllerManager {
         _ = rightTrigger
 
         handleLeftThumbstickWheel(leftX: leftX, leftY: leftY)
+        handleRightThumbstickWheel(rightX: rightThumbstickX, rightY: rightThumbstickY)
         handleTouchpadFrame(
             primaryX: touchpadX,
             primaryY: touchpadY,
@@ -470,7 +515,7 @@ final class ControllerManager {
 
         currentController = nil
         connectionState = .disconnected
-        hideWheelIfVisible(reason: "controller_disconnected")
+        hideWheelsIfVisible(reason: "controller_disconnected")
         hideControllerActionHintIfVisible(reason: "controller_disconnected")
         stopAllRepeatingButtons(reason: "controller_disconnected")
         resetTouchpadState(reason: "controller_disconnected")
@@ -856,23 +901,23 @@ final class ControllerManager {
         let slots = configuration.leftThumbstickWheel.slots
 
         guard slots.count >= 2 else {
-            logDebug("Wheel config invalid slot count: \(slots.count)")
+            logDebug("left_thumbstick_wheel_invalid_slot_count count=\(slots.count)")
             return
         }
 
         if magnitude >= threshold {
-            let index = wheelSlotIndex(leftX: leftX, leftY: leftY, slotCount: slots.count)
+            let index = wheelSlotIndex(x: leftX, y: leftY, slotCount: slots.count)
 
-            if !isWheelVisible {
-                isWheelVisible = true
-                selectedWheelSlotIndex = index
+            if !isLeftWheelVisible {
+                isLeftWheelVisible = true
+                selectedLeftWheelSlotIndex = index
                 leftThumbstickWheelPresenter.show(slots: slots, selectedIndex: index)
                 logInfo("left_thumbstick_wheel_show slot=\(index + 1) title=\(slots[index].title)")
                 return
             }
 
-            if selectedWheelSlotIndex != index {
-                selectedWheelSlotIndex = index
+            if selectedLeftWheelSlotIndex != index {
+                selectedLeftWheelSlotIndex = index
                 leftThumbstickWheelPresenter.updateSelection(selectedIndex: index, slots: slots)
                 logInfo("left_thumbstick_wheel_select slot=\(index + 1) title=\(slots[index].title)")
             }
@@ -880,47 +925,117 @@ final class ControllerManager {
             return
         }
 
-        guard isWheelVisible else { return }
+        guard isLeftWheelVisible else { return }
 
         leftThumbstickWheelPresenter.hide()
-        isWheelVisible = false
+        isLeftWheelVisible = false
 
-        guard let selectedWheelSlotIndex else {
+        guard let selectedLeftWheelSlotIndex else {
             logDebug("left_thumbstick_wheel_hide without selection")
             return
         }
 
-        self.selectedWheelSlotIndex = nil
+        self.selectedLeftWheelSlotIndex = nil
 
-        let slot = slots[selectedWheelSlotIndex]
-        logInfo("left_thumbstick_wheel_confirm slot=\(selectedWheelSlotIndex + 1) title=\(slot.title)")
+        let slot = slots[selectedLeftWheelSlotIndex]
+        logInfo("left_thumbstick_wheel_confirm slot=\(selectedLeftWheelSlotIndex + 1) title=\(slot.title)")
 
         guard let binding = slot.script else {
             if slot.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "cancel" {
-                logInfo("left_thumbstick_wheel_cancelled slot=\(selectedWheelSlotIndex + 1)")
+                logInfo("left_thumbstick_wheel_cancelled slot=\(selectedLeftWheelSlotIndex + 1)")
             } else {
-                logDebug("left_thumbstick_wheel_no_script slot=\(selectedWheelSlotIndex + 1) title=\(slot.title)")
+                logDebug("left_thumbstick_wheel_no_script slot=\(selectedLeftWheelSlotIndex + 1) title=\(slot.title)")
             }
             return
         }
 
-        scriptExecutor.execute(binding: binding, trigger: "leftThumbstick.slot\(selectedWheelSlotIndex + 1)")
+        scriptExecutor.execute(binding: binding, trigger: "leftThumbstick.slot\(selectedLeftWheelSlotIndex + 1)")
     }
 
-    private func wheelSlotIndex(leftX: Float, leftY: Float, slotCount: Int) -> Int {
-        let angleFromXAxis = atan2(Double(leftY), Double(leftX)) * 180 / Double.pi
+    private func handleRightThumbstickWheel(rightX: Float, rightY: Float) {
+        let magnitude = sqrt((rightX * rightX) + (rightY * rightY))
+        let threshold = configuration.rightThumbstickWheel.activationThreshold
+        let slots = configuration.rightThumbstickWheel.slots
+
+        guard slots.count >= 2 else {
+            logDebug("right_thumbstick_wheel_invalid_slot_count count=\(slots.count)")
+            return
+        }
+
+        if magnitude >= threshold {
+            let index = wheelSlotIndex(x: rightX, y: rightY, slotCount: slots.count)
+
+            if !isRightWheelVisible {
+                isRightWheelVisible = true
+                selectedRightWheelSlotIndex = index
+                rightThumbstickWheelPresenter.show(slots: slots, selectedIndex: index)
+                logInfo("right_thumbstick_wheel_show slot=\(index + 1) title=\(slots[index].title)")
+                return
+            }
+
+            if selectedRightWheelSlotIndex != index {
+                selectedRightWheelSlotIndex = index
+                rightThumbstickWheelPresenter.updateSelection(selectedIndex: index, slots: slots)
+                logInfo("right_thumbstick_wheel_select slot=\(index + 1) title=\(slots[index].title)")
+            }
+
+            return
+        }
+
+        guard isRightWheelVisible else { return }
+
+        rightThumbstickWheelPresenter.hide()
+        isRightWheelVisible = false
+
+        guard let selectedRightWheelSlotIndex else {
+            logDebug("right_thumbstick_wheel_hide without selection")
+            return
+        }
+
+        self.selectedRightWheelSlotIndex = nil
+
+        let slot = slots[selectedRightWheelSlotIndex]
+        logInfo("right_thumbstick_wheel_confirm slot=\(selectedRightWheelSlotIndex + 1) title=\(slot.title)")
+
+        guard let binding = slot.script else {
+            if slot.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "cancel" {
+                logInfo("right_thumbstick_wheel_cancelled slot=\(selectedRightWheelSlotIndex + 1)")
+            } else {
+                logDebug("right_thumbstick_wheel_no_script slot=\(selectedRightWheelSlotIndex + 1) title=\(slot.title)")
+            }
+            return
+        }
+
+        scriptExecutor.execute(binding: binding, trigger: "rightThumbstick.slot\(selectedRightWheelSlotIndex + 1)")
+    }
+
+    private func wheelSlotIndex(x: Float, y: Float, slotCount: Int) -> Int {
+        let angleFromXAxis = atan2(Double(y), Double(x)) * 180 / Double.pi
         let clockwiseFromUp = fmod((90.0 - angleFromXAxis + 360.0), 360.0)
         let segmentSize = 360.0 / Double(slotCount)
         let shifted = fmod(clockwiseFromUp + (segmentSize / 2), 360.0)
         return Int(shifted / segmentSize)
     }
 
-    private func hideWheelIfVisible(reason: String) {
-        guard isWheelVisible else { return }
-        isWheelVisible = false
-        selectedWheelSlotIndex = nil
+    private func hideWheelsIfVisible(reason: String) {
+        hideLeftWheelIfVisible(reason: reason)
+        hideRightWheelIfVisible(reason: reason)
+    }
+
+    private func hideLeftWheelIfVisible(reason: String) {
+        guard isLeftWheelVisible else { return }
+        isLeftWheelVisible = false
+        selectedLeftWheelSlotIndex = nil
         leftThumbstickWheelPresenter.hide()
         logInfo("left_thumbstick_wheel_hide reason=\(reason)")
+    }
+
+    private func hideRightWheelIfVisible(reason: String) {
+        guard isRightWheelVisible else { return }
+        isRightWheelVisible = false
+        selectedRightWheelSlotIndex = nil
+        rightThumbstickWheelPresenter.hide()
+        logInfo("right_thumbstick_wheel_hide reason=\(reason)")
     }
 
     private func startInputLoop() {
@@ -955,7 +1070,9 @@ final class ControllerManager {
             touchpadX: touchpadInput.primaryX,
             touchpadY: touchpadInput.primaryY,
             leftTrigger: gamepad.leftTrigger.value,
-            rightTrigger: gamepad.rightTrigger.value
+            rightTrigger: gamepad.rightTrigger.value,
+            rightThumbstickX: gamepad.rightThumbstick.xAxis.value,
+            rightThumbstickY: gamepad.rightThumbstick.yAxis.value
         )
     }
 
@@ -1041,7 +1158,7 @@ final class ControllerManager {
             issues.append("Missing config file at PS_CONTROLLER_CONFIG_PATH: \(resolution.url.path)")
         }
 
-        if resolution.source == "app_support" && !resolution.fileExists {
+        if resolution.source == "cwd" && !resolution.fileExists {
             issues.append("Config file missing; default config was generated at: \(resolution.url.path)")
         }
 
@@ -1054,6 +1171,7 @@ final class ControllerManager {
 
         let allCommands = configuration.buttons.values.map(\.command)
             + configuration.leftThumbstickWheel.slots.compactMap { $0.script?.command }
+            + configuration.rightThumbstickWheel.slots.compactMap { $0.script?.command }
 
         for rawCommand in allCommands {
             for segment in commandSegments(rawCommand) {
@@ -1137,8 +1255,114 @@ final class ControllerManager {
         return issues
     }
 
-    private func ensureASRServerRunning(asrServer: VoiceInputASRServerConfiguration) -> ASRAutoStartStatus {
-        guard asrServer.autoStart else {
+    private func restartASRServerEnsuringHealthyLocked(
+        configuration: ControllerConfiguration,
+        forceRestartUnmanagedRunningService: Bool
+    ) -> (success: Bool, message: String) {
+        guard let voiceInput = configuration.voiceInput, voiceInput.enabled else {
+            let message = "ASR restart skipped: voice input is disabled in configuration"
+            logError("asr_server_manual_restart_failed reason=voice_input_disabled")
+            return (false, message)
+        }
+
+        let asrServer = voiceInput.asrServer
+
+        guard let asrBaseURL = URL(string: asrServer.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            let message = "ASR restart failed: invalid baseURL \(asrServer.baseURL)"
+            logError("asr_server_manual_restart_failed reason=invalid_base_url baseURL=\(asrServer.baseURL)")
+            return (false, message)
+        }
+
+        guard let asrHealthURL = makeASRHealthURL(fromBaseURL: asrBaseURL) else {
+            let message = "ASR restart failed: unable to build health URL from \(asrServer.baseURL)"
+            logError("asr_server_manual_restart_failed reason=invalid_health_url baseURL=\(asrServer.baseURL)")
+            return (false, message)
+        }
+
+        let timeout = min(asrServer.timeoutSeconds, 5)
+        let wasManagedProcessRunning = asrAutoStartedProcess?.isRunning == true
+
+        logInfo("asr_server_manual_restart_requested endpoint=\(asrHealthURL.absoluteString) managedRunning=\(wasManagedProcessRunning) forceRestartUnmanaged=\(forceRestartUnmanagedRunningService)")
+
+        if wasManagedProcessRunning {
+            stopASRAutoStartedProcessIfNeeded(reason: "manual_restart")
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+
+        let wasReachableBeforeStart = isHTTPServiceReachable(url: asrHealthURL, timeout: timeout)
+        var forcedUnmanagedRestart = false
+
+        if !wasManagedProcessRunning && wasReachableBeforeStart {
+            if !forceRestartUnmanagedRunningService {
+                let message = "ASR server already running and healthy at: \(asrHealthURL.absoluteString)"
+                logInfo("asr_server_manual_restart_skipped reason=unmanaged_running_service endpoint=\(asrHealthURL.absoluteString)")
+                return (true, message)
+            }
+
+            guard let hostPort = asrHostPort(fromBaseURLText: asrServer.baseURL) else {
+                let message = "ASR restart failed: unable to parse host/port from \(asrServer.baseURL)"
+                logError("asr_server_manual_restart_failed reason=force_restart_parse_host_port_failed baseURL=\(asrServer.baseURL)")
+                return (false, message)
+            }
+
+            guard isLocalHost(hostPort.host) else {
+                let message = "ASR restart failed: force restart supports only local host, got \(hostPort.host)"
+                logError("asr_server_manual_restart_failed reason=force_restart_non_local_host host=\(hostPort.host) port=\(hostPort.port)")
+                return (false, message)
+            }
+
+            let forceRestartResult = stopUnmanagedASRServiceListeningOnPort(
+                port: hostPort.port,
+                reason: "forced_restart_after_transcription_failure"
+            )
+            guard forceRestartResult.success else {
+                let message = "ASR restart failed: \(forceRestartResult.message)"
+                logError("asr_server_manual_restart_failed reason=force_restart_stop_unmanaged_failed detail=\(forceRestartResult.message)")
+                return (false, message)
+            }
+
+            forcedUnmanagedRestart = true
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+
+        switch ensureASRServerRunning(asrServer: asrServer, allowManualStartWhenAutoStartDisabled: true) {
+        case .skipped:
+            let message = "ASR restart failed: start was skipped"
+            logError("asr_server_manual_restart_failed reason=start_skipped")
+            return (false, message)
+        case .failed(let reason):
+            let message = "ASR restart failed: \(reason)"
+            logError("asr_server_manual_restart_failed reason=start_error detail=\(reason)")
+            return (false, message)
+        case .started:
+            logInfo("asr_server_manual_restart_started endpoint=\(asrHealthURL.absoluteString)")
+        case .alreadyRunning:
+            logInfo("asr_server_manual_restart_already_running endpoint=\(asrHealthURL.absoluteString)")
+        }
+
+        let isHealthy = waitForHTTPServiceReachable(
+            url: asrHealthURL,
+            timeout: timeout,
+            maxWaitSeconds: max(8, min(asrServer.timeoutSeconds, 20))
+        )
+
+        guard isHealthy else {
+            let message = "ASR server failed health check at: \(asrHealthURL.absoluteString)"
+            logError("asr_server_manual_restart_failed reason=health_check_timeout endpoint=\(asrHealthURL.absoluteString)")
+            return (false, message)
+        }
+
+        let action = (wasManagedProcessRunning || forcedUnmanagedRestart) ? "restarted" : "started"
+        let message = "ASR server \(action) and healthy at: \(asrHealthURL.absoluteString)"
+        logInfo("asr_server_manual_restart_success action=\(action) endpoint=\(asrHealthURL.absoluteString)")
+        return (true, message)
+    }
+
+    private func ensureASRServerRunning(
+        asrServer: VoiceInputASRServerConfiguration,
+        allowManualStartWhenAutoStartDisabled: Bool = false
+    ) -> ASRAutoStartStatus {
+        guard asrServer.autoStart || allowManualStartWhenAutoStartDisabled else {
             return .skipped
         }
 
@@ -1228,6 +1452,185 @@ final class ControllerManager {
         asrAutoStartedStdoutPipe = nil
         asrAutoStartedStderrPipe = nil
         asrAutoStartedProcess = nil
+    }
+
+    private func stopUnmanagedASRServiceListeningOnPort(port: Int, reason: String) -> (success: Bool, message: String) {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+
+        let initialLookup = listeningProcessIDs(onTCPPort: port)
+        if let lookupError = initialLookup.error {
+            return (false, "failed to discover listening PID: \(lookupError)")
+        }
+
+        let targetPIDs = Set(initialLookup.pids.filter { $0 != currentPID }).sorted()
+        guard !targetPIDs.isEmpty else {
+            logInfo("asr_server_unmanaged_stop_skipped reason=no_listener_on_port port=\(port)")
+            return (true, "no listener on port \(port)")
+        }
+
+        logInfo("asr_server_unmanaged_stop_begin reason=\(reason) port=\(port) pids=\(targetPIDs.map(String.init).joined(separator: ","))")
+
+        var termFailedPIDs: [Int32] = []
+        for pid in targetPIDs {
+            let termSucceeded = sendSignalToProcess(pid: pid, signal: "-TERM")
+            if !termSucceeded {
+                termFailedPIDs.append(pid)
+            }
+        }
+
+        if !termFailedPIDs.isEmpty {
+            logError("asr_server_unmanaged_stop_term_failed port=\(port) pids=\(termFailedPIDs.map(String.init).joined(separator: ","))")
+        }
+
+        if waitForNoListenerOnTCPPort(port: port, maxWaitSeconds: 1.5) {
+            logInfo("asr_server_unmanaged_stop_done method=term port=\(port)")
+            return (true, "terminated unmanaged ASR listener on port \(port)")
+        }
+
+        let postTermLookup = listeningProcessIDs(onTCPPort: port)
+        if let lookupError = postTermLookup.error {
+            return (false, "failed to verify listener after TERM: \(lookupError)")
+        }
+
+        let remainingPIDs = Set(postTermLookup.pids.filter { $0 != currentPID }).sorted()
+        if remainingPIDs.isEmpty {
+            logInfo("asr_server_unmanaged_stop_done method=term_verify port=\(port)")
+            return (true, "terminated unmanaged ASR listener on port \(port)")
+        }
+
+        logInfo("asr_server_unmanaged_stop_escalate signal=KILL port=\(port) pids=\(remainingPIDs.map(String.init).joined(separator: ","))")
+
+        var killFailedPIDs: [Int32] = []
+        for pid in remainingPIDs {
+            let killSucceeded = sendSignalToProcess(pid: pid, signal: "-KILL")
+            if !killSucceeded {
+                killFailedPIDs.append(pid)
+            }
+        }
+
+        if !killFailedPIDs.isEmpty {
+            logError("asr_server_unmanaged_stop_kill_failed port=\(port) pids=\(killFailedPIDs.map(String.init).joined(separator: ","))")
+        }
+
+        if waitForNoListenerOnTCPPort(port: port, maxWaitSeconds: 1.5) {
+            logInfo("asr_server_unmanaged_stop_done method=kill port=\(port)")
+            return (true, "killed unmanaged ASR listener on port \(port)")
+        }
+
+        let finalLookup = listeningProcessIDs(onTCPPort: port)
+        if let lookupError = finalLookup.error {
+            return (false, "failed to verify listener after KILL: \(lookupError)")
+        }
+
+        let finalPIDs = Set(finalLookup.pids.filter { $0 != currentPID }).sorted()
+        if finalPIDs.isEmpty {
+            logInfo("asr_server_unmanaged_stop_done method=kill_verify port=\(port)")
+            return (true, "killed unmanaged ASR listener on port \(port)")
+        }
+
+        return (false, "listener still active on port \(port), pids=\(finalPIDs.map(String.init).joined(separator: ","))")
+    }
+
+    private func listeningProcessIDs(onTCPPort port: Int) -> (pids: [Int32], error: String?) {
+        guard let lsofPath = resolveExecutablePath("lsof") else {
+            return ([], "lsof_not_found")
+        }
+
+        guard let commandResult = runLocalProcess(executablePath: lsofPath, arguments: ["-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"]) else {
+            return ([], "lsof_run_failed")
+        }
+
+        if commandResult.status != 0 {
+            let stderr = commandResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if commandResult.status == 1 && stderr.isEmpty {
+                return ([], nil)
+            }
+
+            let detail = stderr.isEmpty ? "exit_status_\(commandResult.status)" : stderr
+            return ([], detail)
+        }
+
+        let pids = commandResult.stdout
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .compactMap(Int32.init)
+
+        return (pids, nil)
+    }
+
+    private func sendSignalToProcess(pid: Int32, signal: String) -> Bool {
+        guard let killPath = resolveExecutablePath("kill") else {
+            logError("asr_server_unmanaged_stop_signal_failed reason=kill_not_found pid=\(pid) signal=\(signal)")
+            return false
+        }
+
+        guard let result = runLocalProcess(executablePath: killPath, arguments: [signal, String(pid)]) else {
+            logError("asr_server_unmanaged_stop_signal_failed reason=kill_run_failed pid=\(pid) signal=\(signal)")
+            return false
+        }
+
+        if result.status != 0 {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = stderr.isEmpty ? "exit_status_\(result.status)" : stderr
+            logError("asr_server_unmanaged_stop_signal_failed reason=kill_non_zero pid=\(pid) signal=\(signal) detail=\(detail)")
+            return false
+        }
+
+        return true
+    }
+
+    private func waitForNoListenerOnTCPPort(port: Int, maxWaitSeconds: TimeInterval) -> Bool {
+        let attempts = max(1, Int(ceil(maxWaitSeconds / 0.2)))
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+
+        for attempt in 0..<attempts {
+            let lookup = listeningProcessIDs(onTCPPort: port)
+            guard lookup.error == nil else {
+                return false
+            }
+
+            let remainingPIDs = lookup.pids.filter { $0 != currentPID }
+            if remainingPIDs.isEmpty {
+                return true
+            }
+
+            if attempt < attempts - 1 {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
+
+        return false
+    }
+
+    private func runLocalProcess(
+        executablePath: String,
+        arguments: [String]
+    ) -> (status: Int32, stdout: String, stderr: String)? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            logError("asr_server_local_process_run_failed executable=\(executablePath) arguments=\(arguments.joined(separator: " ")) message=\(error.localizedDescription)")
+            return nil
+        }
+
+        process.waitUntilExit()
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+
+        return (process.terminationStatus, stdout, stderr)
     }
 
     private func bindASRServerPipe(_ pipe: Pipe, stream: String) {
@@ -1321,6 +1724,11 @@ final class ControllerManager {
         let host = components.host ?? "127.0.0.1"
         let port = components.port ?? 8765
         return (host, port)
+    }
+
+    private func isLocalHost(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1"
     }
 
     private func waitForHTTPServiceReachable(url: URL, timeout: TimeInterval, maxWaitSeconds: TimeInterval) -> Bool {

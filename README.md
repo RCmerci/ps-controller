@@ -56,11 +56,10 @@ Bluetooth connection is intentionally not supported in this project because cont
 Config resolution order at runtime:
 
 1. `PS_CONTROLLER_CONFIG_PATH` (if set)
-2. App bundle resource: `Contents/Resources/controller-config.json`
-3. Current working directory: `./controller-config.json` (useful for `swift run`)
-4. Fallback: `~/Library/Application Support/PSController/controller-config.json`
+2. Current working directory: `./controller-config.json` (useful for `swift run`)
+3. App bundle resource: `Contents/Resources/controller-config.json`
 
-If no file is found in the selected location, the app writes a default config there.
+If no file is found in the selected location, the app writes a default config to the current working directory path.
 
 ### Button script mapping
 
@@ -187,23 +186,25 @@ Prepare local `qwen3-asr-rs` server:
   --port 8765
 ```
 
-### Left thumbstick wheel (5 slots)
+### Thumbstick wheels (left/right, 5 slots each)
 
-`leftThumbstickWheel` config controls a GTA-style radial chooser:
+Both `leftThumbstickWheel` and `rightThumbstickWheel` support a GTA-style radial chooser:
 
 - `activationThreshold`: how far the stick must move to open/select.
 - `slots`: exactly 5 slots (`title` + optional `script`).
 - Default config includes one `Cancel` slot (slot 5, no script).
 
-Runtime behavior:
+Runtime behavior (same for both sticks):
 
-1. Move **left thumbstick** beyond threshold to show wheel.
+1. Move the thumbstick beyond threshold to show wheel.
 2. Stick direction and highlighted slot are angle-aligned (top -> slot 1, then clockwise).
 3. Return stick to center to confirm. If the slot has no script (for example `Cancel`), nothing is executed.
 
+Each slot can execute an independent shell script by setting `slots[n].script` in `controller-config.json`.
+
 Mouse cursor movement is controlled by the **touchpad primary finger**.
 Two-finger touchpad gesture performs wheel scrolling.
-Right thumbstick movement no longer controls the mouse cursor.
+Right thumbstick movement no longer controls the mouse cursor directly; it now controls `rightThumbstickWheel`.
 
 ## Notes
 

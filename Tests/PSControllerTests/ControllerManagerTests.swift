@@ -248,6 +248,7 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.buttons[.buttonA]?.name, "buttonA")
         XCTAssertEqual(decoded.leftThumbstickWheel.slots.first?.title, "Emacs")
         XCTAssertEqual(decoded.leftThumbstickWheel.slots.first?.script?.name, "switch-emacs")
+        XCTAssertEqual(decoded.rightThumbstickWheel.slots.count, 5)
     }
 
     func testControllerConfigurationDecodesVoiceInputConfiguration() throws {
@@ -940,10 +941,10 @@ final class ControllerManagerTests: XCTestCase {
         sut.processInput(
             leftX: 0,
             leftY: 0,
-            rightX: 0.6,
-            rightY: -0.6,
             leftTrigger: 0,
-            rightTrigger: 0
+            rightTrigger: 0,
+            rightThumbstickX: 0.6,
+            rightThumbstickY: -0.6
         )
 
         XCTAssertEqual(bridge.moveCount, 0)
@@ -1121,6 +1122,90 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(wheelPresenter.lastSelectedIndex, 1)
     }
 
+    func testRightThumbstickWheelShowsThenExecutesSelectedSlotOnRelease() {
+        let bridge = MockMouseEventBridge()
+        let leftWheelPresenter = MockLeftThumbstickWheelPresenter()
+        let rightWheelPresenter = MockLeftThumbstickWheelPresenter()
+        let executor = MockScriptExecutor()
+
+        let rightWheelConfig = RightThumbstickWheelConfiguration(activationThreshold: 0.45, slots: makeWheelSlots())
+        let config = ControllerConfiguration(
+            buttons: [:],
+            leftThumbstickWheel: makeWheelConfig(),
+            rightThumbstickWheel: rightWheelConfig
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: leftWheelPresenter,
+            rightWheelPresenter: rightWheelPresenter
+        )
+
+        sut.processInput(
+            leftX: 0.0,
+            leftY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0,
+            rightThumbstickX: 0.0,
+            rightThumbstickY: 1.0
+        )
+
+        XCTAssertEqual(rightWheelPresenter.showCallCount, 1)
+        XCTAssertEqual(rightWheelPresenter.lastSelectedIndex, 0)
+        XCTAssertEqual(executor.executions.count, 0)
+
+        sut.processInput(
+            leftX: 0.0,
+            leftY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0,
+            rightThumbstickX: 0.0,
+            rightThumbstickY: 0.0
+        )
+
+        XCTAssertEqual(rightWheelPresenter.hideCallCount, 1)
+        XCTAssertEqual(executor.executions.count, 1)
+        XCTAssertEqual(executor.executions[0].trigger, "rightThumbstick.slot1")
+        XCTAssertEqual(executor.executions[0].binding.name, "wheel-slot-1")
+        XCTAssertEqual(leftWheelPresenter.showCallCount, 0)
+    }
+
+    func testRightThumbstickWheelDirectionAlignmentMatchesSlotIndices() {
+        let bridge = MockMouseEventBridge()
+        let leftWheelPresenter = MockLeftThumbstickWheelPresenter()
+        let rightWheelPresenter = MockLeftThumbstickWheelPresenter()
+
+        let rightWheelConfig = RightThumbstickWheelConfiguration(activationThreshold: 0.45, slots: makeWheelSlots())
+        let config = ControllerConfiguration(
+            buttons: [:],
+            leftThumbstickWheel: makeWheelConfig(),
+            rightThumbstickWheel: rightWheelConfig
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: leftWheelPresenter,
+            rightWheelPresenter: rightWheelPresenter
+        )
+
+        sut.processInput(leftX: 0.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0, rightThumbstickX: 0.0, rightThumbstickY: 1.0)
+        XCTAssertEqual(rightWheelPresenter.lastSelectedIndex, 0)
+
+        sut.processInput(leftX: 0.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0, rightThumbstickX: 1.0, rightThumbstickY: 0.0)
+        XCTAssertEqual(rightWheelPresenter.lastSelectedIndex, 1)
+
+        sut.processInput(leftX: 0.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0, rightThumbstickX: 0.0, rightThumbstickY: -1.0)
+        XCTAssertEqual(rightWheelPresenter.lastSelectedIndex, 3)
+
+        sut.processInput(leftX: 0.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0, rightThumbstickX: -1.0, rightThumbstickY: 0.0)
+        XCTAssertEqual(rightWheelPresenter.lastSelectedIndex, 4)
+        XCTAssertEqual(leftWheelPresenter.showCallCount, 0)
+    }
+
     func testLeftThumbstickWheelDirectionAlignmentMatchesSlotIndices() {
         let bridge = MockMouseEventBridge()
         let wheelPresenter = MockLeftThumbstickWheelPresenter()
@@ -1171,10 +1256,15 @@ final class ControllerManagerTests: XCTestCase {
     }
 
     func testDefaultConfigurationHasCancelSlot() {
-        let slots = ControllerConfiguration.default.leftThumbstickWheel.slots
-        XCTAssertEqual(slots.count, 5)
-        XCTAssertEqual(slots[4].title, "Cancel")
-        XCTAssertNil(slots[4].script)
+        let leftSlots = ControllerConfiguration.default.leftThumbstickWheel.slots
+        XCTAssertEqual(leftSlots.count, 5)
+        XCTAssertEqual(leftSlots[4].title, "Cancel")
+        XCTAssertNil(leftSlots[4].script)
+
+        let rightSlots = ControllerConfiguration.default.rightThumbstickWheel.slots
+        XCTAssertEqual(rightSlots.count, 5)
+        XCTAssertEqual(rightSlots[4].title, "Cancel")
+        XCTAssertNil(rightSlots[4].script)
     }
 
     func testDefaultCancelSlotDoesNotExecuteScript() {
@@ -1201,6 +1291,7 @@ final class ControllerManagerTests: XCTestCase {
         configProvider: ControllerConfigurationProviding,
         scriptExecutor: ScriptExecuting,
         wheelPresenter: LeftThumbstickWheelPresenting,
+        rightWheelPresenter: LeftThumbstickWheelPresenting? = nil,
         voiceInputController: VoiceInputControlling = MockVoiceInputController(),
         textInputInjector: TextInputInjecting = MockTextInputInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = MockVoiceTranscriptCorrector(),
@@ -1214,6 +1305,7 @@ final class ControllerManagerTests: XCTestCase {
             configurationProvider: configProvider,
             scriptExecutor: scriptExecutor,
             leftThumbstickWheelPresenter: wheelPresenter,
+            rightThumbstickWheelPresenter: rightWheelPresenter ?? MockLeftThumbstickWheelPresenter(),
             controllerActionHintPresenter: controllerActionHintPresenter,
             voiceInputController: voiceInputController,
             textInputInjector: textInputInjector,
