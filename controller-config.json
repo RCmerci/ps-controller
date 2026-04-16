@@ -64,25 +64,32 @@
       "name": "rightThumbstickButton",
       "command": "echo 'Configure script for rightThumbstickButton'"
     },
+    "touchpadButton": {
+      "name": "touchpadButton",
+      "command": "echo 'Configure script for touchpadButton'"
+    },
     "rightTrigger": {
       "name": "rightTrigger",
       "command": "echo 'Configure script for rightTrigger'"
     }
+  },
+  "touchpad": {
+    "pointerSensitivity": 24,
+    "scrollSensitivity": 3.0
   },
   "voiceInput": {
     "enabled": true,
     "activationButton": "buttonB",
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
-      "apiKey": "ps-controller-mlx-qwen3-asr",
+      "apiKey": "",
       "model": "Qwen/Qwen3-ASR-0.6B",
       "timeoutSeconds": 30,
       "autoStart": true,
-      "launchExecutable": "mlx-qwen3-asr",
+      "launchExecutable": "/Users/rcmerci/qwen3_asr_rs/asr-server",
       "launchArguments": [
-        "serve",
-        "--job-ttl",
-        "120"
+        "--model-dir",
+        "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"
       ]
     }
   },
@@ -112,10 +119,6 @@
       },
       {
         "title": "Slot 4",
-        "script": null
-      },
-      {
-        "title": "Slot 5",
         "script": null
       },
       {

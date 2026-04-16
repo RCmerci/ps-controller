@@ -36,6 +36,184 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(executor.executions[1].binding.name, "script-b")
     }
 
+    func testTouchpadButtonPressTriggersLeftClickAndSkipsScript() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let config = ControllerConfiguration(
+            buttons: [
+                .touchpadButton: ScriptBinding(name: "should-not-run", command: "echo blocked")
+            ],
+            leftThumbstickWheel: makeWheelConfig()
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        sut.handleButtonInput(.touchpadButton, isPressed: true)
+        sut.handleButtonInput(.touchpadButton, isPressed: false)
+
+        XCTAssertEqual(bridge.leftClickCount, 1)
+        XCTAssertEqual(executor.executions.count, 0)
+    }
+
+    func testDefaultConfigurationIncludesTouchpadButtonBinding() {
+        XCTAssertEqual(ControllerConfiguration.default.buttons[.touchpadButton]?.name, "touchpadButton")
+        XCTAssertEqual(ControllerConfiguration.default.buttons[.touchpadButton]?.command, "echo 'Configure script for touchpadButton'")
+    }
+
+    func testDependencyCheckIgnoresQuotedScriptFragments() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let config = ControllerConfiguration(
+            buttons: [
+                .leftTrigger: ScriptBinding(
+                    name: "jxa-scroll",
+                    command: "osascript -l JavaScript -e 'ObjC.import(\"ApplicationServices\"); var e = $.CGEventCreateScrollWheelEvent(null, $.kCGScrollEventUnitLine, 1, 3); $.CGEventPost($.kCGHIDEventTap, e);'"
+                ),
+                .dpadUp: ScriptBinding(
+                    name: "front-app-check",
+                    command: "__front_app=\"$(osascript -e 'tell application \\\"System Events\\\" to name of first process whose frontmost is true')\"; __run_status=$?; echo \"status=${__run_status}\""
+                )
+            ],
+            leftThumbstickWheel: makeWheelConfig()
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        let done = expectation(description: "dependency_check_finished")
+
+        sut.onDependencyIssuesChanged = { issues in
+            let forbiddenIssues = [
+                "Missing command in PATH: var",
+                "Missing command in PATH: -e",
+                "Missing command in PATH: __run_status=$?",
+                "Missing command in PATH: $.CGEventPost($.kCGHIDEventTap,"
+            ]
+
+            for forbiddenIssue in forbiddenIssues {
+                XCTAssertFalse(issues.contains(forbiddenIssue), "Unexpected false positive dependency issue: \(forbiddenIssue)")
+            }
+
+            done.fulfill()
+        }
+
+        sut.startMonitoring()
+
+        wait(for: [done], timeout: 3.0)
+    }
+
+    func testDependencyCheckReportsMissingCommandForRealExecutable() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let missingCommand = "ps_controller_missing_command_9f3d2c"
+        let config = ControllerConfiguration(
+            buttons: [
+                .buttonA: ScriptBinding(name: "missing-cmd", command: "\(missingCommand) --version")
+            ],
+            leftThumbstickWheel: makeWheelConfig()
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        let done = expectation(description: "dependency_check_reports_missing_command")
+
+        sut.onDependencyIssuesChanged = { issues in
+            XCTAssertTrue(
+                issues.contains("Missing command in PATH: \(missingCommand)"),
+                "Expected missing command issue for \(missingCommand), got: \(issues)"
+            )
+            done.fulfill()
+        }
+
+        sut.startMonitoring()
+
+        wait(for: [done], timeout: 3.0)
+    }
+
+    func testTriggerHoldRepeatsScriptAndStopsAfterRelease() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let config = ControllerConfiguration(
+            buttons: [
+                .leftTrigger: ScriptBinding(name: "scroll-up", command: "echo up")
+            ],
+            leftThumbstickWheel: makeWheelConfig()
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            triggerRepeatInitialDelay: 0.02,
+            triggerRepeatInterval: 0.02
+        )
+
+        let done = expectation(description: "repeat_stops_after_release")
+
+        sut.handleButtonInput(.leftTrigger, isPressed: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+            let countAtRelease = executor.executions.count
+            sut.handleButtonInput(.leftTrigger, isPressed: false)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                XCTAssertGreaterThanOrEqual(countAtRelease, 2)
+                XCTAssertEqual(executor.executions.count, countAtRelease)
+                XCTAssertTrue(executor.executions.allSatisfy { $0.trigger == "button.leftTrigger" })
+                done.fulfill()
+            }
+        }
+
+        wait(for: [done], timeout: 1.0)
+    }
+
+    func testNonTriggerButtonDoesNotAutoRepeatWhileHeld() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let config = ControllerConfiguration(
+            buttons: [
+                .buttonA: ScriptBinding(name: "script-a", command: "echo a")
+            ],
+            leftThumbstickWheel: makeWheelConfig()
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            triggerRepeatInitialDelay: 0.02,
+            triggerRepeatInterval: 0.02
+        )
+
+        let done = expectation(description: "button_a_no_repeat")
+
+        sut.handleButtonInput(.buttonA, isPressed: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+            XCTAssertEqual(executor.executions.count, 1)
+            XCTAssertEqual(executor.executions.first?.trigger, "button.buttonA")
+            done.fulfill()
+        }
+
+        wait(for: [done], timeout: 1.0)
+    }
+
     func testControllerConfigurationDecodesStringKeyedButtonsJSON() throws {
         let json = """
         {
@@ -58,7 +236,6 @@ final class ControllerManagerTests: XCTestCase {
               { "title": "Slot 2", "script": null },
               { "title": "Slot 3", "script": null },
               { "title": "Slot 4", "script": null },
-              { "title": "Slot 5", "script": null },
               { "title": "Cancel", "script": null }
             ]
           }
@@ -89,7 +266,6 @@ final class ControllerManagerTests: XCTestCase {
               { "title": "Slot 2", "script": null },
               { "title": "Slot 3", "script": null },
               { "title": "Slot 4", "script": null },
-              { "title": "Slot 5", "script": null },
               { "title": "Cancel", "script": null }
             ]
           },
@@ -107,8 +283,8 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.voiceInput?.activationButton, .buttonOptions)
         XCTAssertEqual(decoded.voiceInput?.asrServer, .default)
         XCTAssertEqual(decoded.voiceInput?.asrServer.autoStart, false)
-        XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "mlx-qwen3-asr")
-        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["serve", "--job-ttl", "120"])
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "/Users/rcmerci/qwen3_asr_rs/asr-server")
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"])
     }
 
     func testControllerConfigurationDecodesVoiceInputASRServerConfiguration() throws {
@@ -127,7 +303,6 @@ final class ControllerManagerTests: XCTestCase {
               { "title": "Slot 2", "script": null },
               { "title": "Slot 3", "script": null },
               { "title": "Slot 4", "script": null },
-              { "title": "Slot 5", "script": null },
               { "title": "Cancel", "script": null }
             ]
           },
@@ -140,8 +315,8 @@ final class ControllerManagerTests: XCTestCase {
               "model": "Qwen/Qwen3-ASR-1.7B",
               "timeoutSeconds": 45,
               "autoStart": true,
-              "launchExecutable": "/opt/homebrew/bin/mlx-qwen3-asr",
-              "launchArguments": ["serve", "--workers", "1"]
+              "launchExecutable": "/Users/rcmerci/qwen3_asr_rs/asr-server",
+              "launchArguments": ["--model-dir", "/tmp/Qwen3-ASR-1.7B"]
             }
           }
         }
@@ -155,8 +330,53 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(decoded.voiceInput?.asrServer.model, "Qwen/Qwen3-ASR-1.7B")
         XCTAssertEqual(decoded.voiceInput?.asrServer.timeoutSeconds, 45)
         XCTAssertEqual(decoded.voiceInput?.asrServer.autoStart, true)
-        XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "/opt/homebrew/bin/mlx-qwen3-asr")
-        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["serve", "--workers", "1"])
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchExecutable, "/Users/rcmerci/qwen3_asr_rs/asr-server")
+        XCTAssertEqual(decoded.voiceInput?.asrServer.launchArguments, ["--model-dir", "/tmp/Qwen3-ASR-1.7B"])
+    }
+
+    func testControllerConfigurationDecodesTouchpadSensitivity() throws {
+        let json = """
+        {
+          "buttons": {
+            "buttonA": {
+              "name": "buttonA",
+              "command": "echo 'a'"
+            }
+          },
+          "leftThumbstickWheel": {
+            "activationThreshold": 0.45,
+            "slots": [
+              { "title": "Slot 1", "script": null },
+              { "title": "Slot 2", "script": null },
+              { "title": "Slot 3", "script": null },
+              { "title": "Slot 4", "script": null },
+              { "title": "Cancel", "script": null }
+            ]
+          },
+          "touchpad": {
+            "pointerSensitivity": 2.4,
+            "scrollSensitivity": 3.1
+          }
+        }
+        """
+
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(ControllerConfiguration.self, from: data)
+
+        XCTAssertEqual(decoded.touchpad.pointerSensitivity, 2.4, accuracy: 0.001)
+        XCTAssertEqual(decoded.touchpad.scrollSensitivity, 3.1, accuracy: 0.001)
+    }
+
+    func testTouchpadSensitivityNormalizationKeepsHighConfiguredValues() {
+        let config = ControllerConfiguration(
+            buttons: ControllerConfiguration.default.buttons,
+            leftThumbstickWheel: ControllerConfiguration.default.leftThumbstickWheel,
+            voiceInput: ControllerConfiguration.default.voiceInput,
+            touchpad: TouchpadConfiguration(pointerSensitivity: 24, scrollSensitivity: 18)
+        ).normalizedForRuntime()
+
+        XCTAssertEqual(config.touchpad.pointerSensitivity, 24, accuracy: 0.001)
+        XCTAssertEqual(config.touchpad.scrollSensitivity, 18, accuracy: 0.001)
     }
 
     func testControllerConfigurationIgnoresUnknownLegacyVoiceField() throws {
@@ -175,7 +395,6 @@ final class ControllerManagerTests: XCTestCase {
               { "title": "Slot 2", "script": null },
               { "title": "Slot 3", "script": null },
               { "title": "Slot 4", "script": null },
-              { "title": "Slot 5", "script": null },
               { "title": "Cancel", "script": null }
             ]
           },
@@ -379,7 +598,8 @@ final class ControllerManagerTests: XCTestCase {
 
         XCTAssertTrue(content.contains("buttonB -> Voice Input (zh-CN)"))
         XCTAssertTrue(content.contains("buttonX -> Default Key"))
-        XCTAssertTrue(content.contains("rightThumbstickButton -> Left Click"))
+        XCTAssertTrue(content.contains("touchpadButton -> Left Click"))
+        XCTAssertTrue(content.contains("rightThumbstickButton -> Default Key"))
         XCTAssertTrue(content.contains("buttonA -> Press Enter"))
     }
 
@@ -581,11 +801,11 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(executor.executions.count, 0)
     }
 
-    func testRightThumbstickButtonPressTriggersLeftClickAndSkipsScript() {
+    func testRightThumbstickButtonPressExecutesMappedScript() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let config = ControllerConfiguration(
-            buttons: [.rightThumbstickButton: ScriptBinding(name: "should-not-run", command: "echo blocked")],
+            buttons: [.rightThumbstickButton: ScriptBinding(name: "right-stick-script", command: "echo run")],
             leftThumbstickWheel: makeWheelConfig()
         ).normalizedForRuntime()
 
@@ -599,11 +819,13 @@ final class ControllerManagerTests: XCTestCase {
         sut.handleButtonInput(.rightThumbstickButton, isPressed: true)
         sut.handleButtonInput(.rightThumbstickButton, isPressed: false)
 
-        XCTAssertEqual(bridge.leftClickCount, 1)
-        XCTAssertEqual(executor.executions.count, 0)
+        XCTAssertEqual(bridge.leftClickCount, 0)
+        XCTAssertEqual(executor.executions.count, 1)
+        XCTAssertEqual(executor.executions[0].trigger, "button.rightThumbstickButton")
+        XCTAssertEqual(executor.executions[0].binding.name, "right-stick-script")
     }
 
-    func testRightThumbstickDeadzonePreventsSmallValues() {
+    func testTouchpadDeadzonePreventsSmallValuesAndAppliesSensitivityCurve() {
         let bridge = MockMouseEventBridge()
         let sut = makeSUT(
             bridge: bridge,
@@ -612,14 +834,225 @@ final class ControllerManagerTests: XCTestCase {
             wheelPresenter: MockLeftThumbstickWheelPresenter()
         )
 
-        sut.processInput(leftX: 0, leftY: 0, rightX: 0.11, rightY: -0.1, leftTrigger: 0, rightTrigger: 0)
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.11,
+            touchpadY: -0.1,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
         XCTAssertEqual(bridge.moveCount, 0)
 
-        sut.processInput(leftX: 0, leftY: 0, rightX: 0.2, rightY: -0.5, leftTrigger: 0, rightTrigger: 0)
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.2,
+            touchpadY: -0.5,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
 
         XCTAssertEqual(bridge.moveCount, 1)
-        XCTAssertEqual(bridge.lastMoveX, 0.2, accuracy: 0.001)
-        XCTAssertEqual(bridge.lastMoveY, -0.5, accuracy: 0.001)
+        XCTAssertLessThan(abs(bridge.lastMoveX), 0.2)
+        XCTAssertLessThan(abs(bridge.lastMoveY), 0.5)
+        XCTAssertGreaterThan(abs(bridge.lastMoveY), 0.01)
+    }
+
+    func testHigherTouchpadPointerSensitivityProducesLargerCursorDelta() {
+        let defaultBridge = MockMouseEventBridge()
+        let highBridge = MockMouseEventBridge()
+
+        let defaultSUT = makeSUT(
+            bridge: defaultBridge,
+            configProvider: MockConfigurationProvider(configuration: .default),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        let highSensitivityConfig = ControllerConfiguration(
+            buttons: ControllerConfiguration.default.buttons,
+            leftThumbstickWheel: ControllerConfiguration.default.leftThumbstickWheel,
+            voiceInput: ControllerConfiguration.default.voiceInput,
+            touchpad: TouchpadConfiguration(pointerSensitivity: 2.6, scrollSensitivity: 1.0)
+        ).normalizedForRuntime()
+
+        let highSensitivitySUT = makeSUT(
+            bridge: highBridge,
+            configProvider: MockConfigurationProvider(configuration: highSensitivityConfig),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        defaultSUT.processInput(leftX: 0, leftY: 0, touchpadX: 0.1, touchpadY: 0.1, leftTrigger: 0, rightTrigger: 0)
+        defaultSUT.processInput(leftX: 0, leftY: 0, touchpadX: 0.4, touchpadY: 0.1, leftTrigger: 0, rightTrigger: 0)
+
+        highSensitivitySUT.processInput(leftX: 0, leftY: 0, touchpadX: 0.1, touchpadY: 0.1, leftTrigger: 0, rightTrigger: 0)
+        highSensitivitySUT.processInput(leftX: 0, leftY: 0, touchpadX: 0.4, touchpadY: 0.1, leftTrigger: 0, rightTrigger: 0)
+
+        XCTAssertEqual(defaultBridge.moveCount, 1)
+        XCTAssertEqual(highBridge.moveCount, 1)
+        XCTAssertGreaterThan(abs(highBridge.lastMoveX), abs(defaultBridge.lastMoveX))
+    }
+
+    func testTouchpadInitialContactUsesTouchPointAsCenterForMovement() {
+        let bridge = MockMouseEventBridge()
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: .default),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.0,
+            touchpadY: 0.8,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 0)
+
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.0,
+            touchpadY: 0.5,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 1)
+        XCTAssertLessThan(bridge.lastMoveY, 0)
+    }
+
+    func testRightThumbstickDoesNotMoveCursorAnymore() {
+        let bridge = MockMouseEventBridge()
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: .default),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            rightX: 0.6,
+            rightY: -0.6,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 0)
+    }
+
+    func testTwoFingerTouchpadScrollsOnlyWhenFingersMove() {
+        let bridge = MockMouseEventBridge()
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: .default),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        // First contact only establishes anchor.
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            rightX: 0.4,
+            rightY: 0.8,
+            touchpadX: 0.3,
+            touchpadY: 0.5,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 0)
+        XCTAssertTrue(bridge.scrollCalls.isEmpty)
+
+        // Fingers move, so scrolling should happen.
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            rightX: 0.4,
+            rightY: -0.8,
+            touchpadX: 0.3,
+            touchpadY: -0.8,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 0)
+        XCTAssertFalse(bridge.scrollCalls.isEmpty)
+        let scrollCountAfterMove = bridge.scrollCalls.count
+
+        // Fingers stop, scrolling should stop.
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            rightX: 0.4,
+            rightY: -0.8,
+            touchpadX: 0.3,
+            touchpadY: -0.8,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.scrollCalls.count, scrollCountAfterMove)
+    }
+
+    func testTouchpadLiftSuppressesImmediateSpikeValues() {
+        let bridge = MockMouseEventBridge()
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: .default),
+            scriptExecutor: MockScriptExecutor(),
+            wheelPresenter: MockLeftThumbstickWheelPresenter()
+        )
+
+        // First contact only establishes anchor.
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.5,
+            touchpadY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        // Movement frame produces cursor move.
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.8,
+            touchpadY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+        XCTAssertEqual(bridge.moveCount, 1)
+
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.0,
+            touchpadY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        sut.processInput(
+            leftX: 0,
+            leftY: 0,
+            touchpadX: 0.98,
+            touchpadY: 0.0,
+            leftTrigger: 0,
+            rightTrigger: 0
+        )
+
+        XCTAssertEqual(bridge.moveCount, 1)
     }
 
     func testProcessInputDoesNotApplyHardcodedTriggerScroll() {
@@ -685,7 +1118,7 @@ final class ControllerManagerTests: XCTestCase {
         sut.processInput(leftX: 1.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0)
 
         XCTAssertGreaterThanOrEqual(wheelPresenter.updateCallCount, 1)
-        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 2)
+        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 1)
     }
 
     func testLeftThumbstickWheelDirectionAlignmentMatchesSlotIndices() {
@@ -702,13 +1135,13 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(wheelPresenter.lastSelectedIndex, 0)
 
         sut.processInput(leftX: 1.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0)
-        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 2)
+        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 1)
 
         sut.processInput(leftX: 0.0, leftY: -1.0, leftTrigger: 0, rightTrigger: 0)
         XCTAssertEqual(wheelPresenter.lastSelectedIndex, 3)
 
         sut.processInput(leftX: -1.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0)
-        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 5)
+        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 4)
     }
 
     func testLeftThumbstickWheelSlotWithoutScriptDoesNotExecute() {
@@ -739,9 +1172,9 @@ final class ControllerManagerTests: XCTestCase {
 
     func testDefaultConfigurationHasCancelSlot() {
         let slots = ControllerConfiguration.default.leftThumbstickWheel.slots
-        XCTAssertEqual(slots.count, 6)
-        XCTAssertEqual(slots[5].title, "Cancel")
-        XCTAssertNil(slots[5].script)
+        XCTAssertEqual(slots.count, 5)
+        XCTAssertEqual(slots[4].title, "Cancel")
+        XCTAssertNil(slots[4].script)
     }
 
     func testDefaultCancelSlotDoesNotExecuteScript() {
@@ -759,7 +1192,7 @@ final class ControllerManagerTests: XCTestCase {
         sut.processInput(leftX: -1.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0)
         sut.processInput(leftX: 0.0, leftY: 0.0, leftTrigger: 0, rightTrigger: 0)
 
-        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 5)
+        XCTAssertEqual(wheelPresenter.lastSelectedIndex, 4)
         XCTAssertEqual(executor.executions.count, 0)
     }
 
@@ -771,7 +1204,9 @@ final class ControllerManagerTests: XCTestCase {
         voiceInputController: VoiceInputControlling = MockVoiceInputController(),
         textInputInjector: TextInputInjecting = MockTextInputInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = MockVoiceTranscriptCorrector(),
-        controllerActionHintPresenter: ControllerActionHintPresenting = MockControllerActionHintPresenter()
+        controllerActionHintPresenter: ControllerActionHintPresenting = MockControllerActionHintPresenter(),
+        triggerRepeatInitialDelay: TimeInterval = 0.25,
+        triggerRepeatInterval: TimeInterval = 0.08
     ) -> ControllerManager {
         ControllerManager(
             mouseBridge: bridge,
@@ -782,7 +1217,9 @@ final class ControllerManagerTests: XCTestCase {
             controllerActionHintPresenter: controllerActionHintPresenter,
             voiceInputController: voiceInputController,
             textInputInjector: textInputInjector,
-            voiceTranscriptCorrector: voiceTranscriptCorrector
+            voiceTranscriptCorrector: voiceTranscriptCorrector,
+            triggerRepeatInitialDelay: triggerRepeatInitialDelay,
+            triggerRepeatInterval: triggerRepeatInterval
         )
     }
 
@@ -791,12 +1228,25 @@ final class ControllerManagerTests: XCTestCase {
     }
 
     private func makeWheelSlots() -> [ThumbstickWheelSlot] {
-        (1...6).map { index in
+        [
             ThumbstickWheelSlot(
-                title: "Slot \(index)",
-                script: ScriptBinding(name: "wheel-slot-\(index)", command: "echo slot-\(index)")
-            )
-        }
+                title: "Slot 1",
+                script: ScriptBinding(name: "wheel-slot-1", command: "echo slot-1")
+            ),
+            ThumbstickWheelSlot(
+                title: "Slot 2",
+                script: ScriptBinding(name: "wheel-slot-2", command: "echo slot-2")
+            ),
+            ThumbstickWheelSlot(
+                title: "Slot 3",
+                script: ScriptBinding(name: "wheel-slot-3", command: "echo slot-3")
+            ),
+            ThumbstickWheelSlot(
+                title: "Slot 4",
+                script: ScriptBinding(name: "wheel-slot-4", command: "echo slot-4")
+            ),
+            ThumbstickWheelSlot(title: "Cancel", script: nil)
+        ]
     }
 }
 

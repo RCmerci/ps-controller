@@ -7,11 +7,26 @@ enum ControllerConnectionState {
     case disconnected
 }
 
+private enum TouchpadMode: String {
+    case idle
+    case move
+    case scroll
+    case suppressed
+}
+
 final class ControllerManager {
     private static let deadzone: Float = 0.12
-    private static let fixedASRAutoStartAPIKey = "ps-controller-mlx-qwen3-asr"
-    private static let defaultASRJobTTLSeconds = 120
+    private static let touchpadContactThreshold: Float = 0.01
+    private static let touchpadMoveEnterDeadzone: Float = 0.01
+    private static let touchpadMoveExitDeadzone: Float = 0.005
+    private static let touchpadMoveCurveGamma: Float = 0.95
+    private static let touchpadScrollDeadzone: Float = 0.01
+    private static let touchpadScrollLinesPerTick: Float = 10.0
+    private static let touchpadLiftSuppressionSeconds: TimeInterval = 0.06
     private static let defaultKeyActionLabel = "Default Key"
+    private static let defaultTriggerRepeatInitialDelay: TimeInterval = 0.25
+    private static let defaultTriggerRepeatInterval: TimeInterval = 0.08
+    private static let repeatableButtons: Set<ControllerButton> = [.leftTrigger, .rightTrigger]
     private static let shellBuiltins: Set<String> = [
         "alias", "bg", "bind", "break", "builtin", "cd", "command", "declare", "dirs", "echo", "eval",
         "exec", "exit", "export", "false", "fc", "fg", "getopts", "hash", "history", "jobs", "kill",
@@ -29,12 +44,21 @@ final class ControllerManager {
     private let voiceInputController: VoiceInputControlling
     private let textInputInjector: TextInputInjecting
     private let voiceTranscriptCorrector: VoiceTranscriptCorrecting
+    private let triggerRepeatInitialDelay: TimeInterval
+    private let triggerRepeatInterval: TimeInterval
 
     private var configuration: ControllerConfiguration = .default
 
     private var isWheelVisible = false
     private var selectedWheelSlotIndex: Int?
     private var isControllerActionHintVisible = false
+    private var touchpadMoveActive = false
+    private var touchpadWasTouching = false
+    private var touchpadLiftSuppressionUntil: Date?
+    private var touchpadScrollRemainder: Double = 0
+    private var touchpadLastPrimaryPosition: (x: Float, y: Float)?
+    private var touchpadLastTwoFingerAverageY: Float?
+    private var touchpadMode: TouchpadMode = .idle
 
     var onLog: ((String) -> Void)?
 
@@ -53,6 +77,7 @@ final class ControllerManager {
     private var connectObserver: NSObjectProtocol?
     private var disconnectObserver: NSObjectProtocol?
     private var inputTimer: DispatchSourceTimer?
+    private var repeatingButtonTimers: [ControllerButton: DispatchSourceTimer] = [:]
 
     private let dependencyCheckQueue = DispatchQueue(label: "PSController.DependencyCheck", qos: .utility)
     private var dependencyCheckToken: UUID?
@@ -70,7 +95,9 @@ final class ControllerManager {
         controllerActionHintPresenter: ControllerActionHintPresenting = ControllerActionHintPresenter(),
         voiceInputController: VoiceInputControlling = Qwen3ASRVoiceInputController(),
         textInputInjector: TextInputInjecting = CGEventTextInputInjector(),
-        voiceTranscriptCorrector: VoiceTranscriptCorrecting = DictionaryVoiceTranscriptCorrector()
+        voiceTranscriptCorrector: VoiceTranscriptCorrecting = DictionaryVoiceTranscriptCorrector(),
+        triggerRepeatInitialDelay: TimeInterval = ControllerManager.defaultTriggerRepeatInitialDelay,
+        triggerRepeatInterval: TimeInterval = ControllerManager.defaultTriggerRepeatInterval
     ) {
         self.mouseBridge = mouseBridge
         self.logger = logger
@@ -81,6 +108,8 @@ final class ControllerManager {
         self.voiceInputController = voiceInputController
         self.textInputInjector = textInputInjector
         self.voiceTranscriptCorrector = voiceTranscriptCorrector
+        self.triggerRepeatInitialDelay = max(0, triggerRepeatInitialDelay)
+        self.triggerRepeatInterval = max(0.01, triggerRepeatInterval)
         self.configuration = applyRuntimeVoiceInputAdjustments(
             configurationProvider.loadConfiguration().normalizedForRuntime()
         )
@@ -135,6 +164,8 @@ final class ControllerManager {
         if !enabled {
             hideWheelIfVisible(reason: "control_paused")
             hideControllerActionHintIfVisible(reason: "control_paused")
+            stopAllRepeatingButtons(reason: "control_paused")
+            resetTouchpadState(reason: "control_paused")
             voiceInputController.stopCapture(trigger: "control_paused")
         }
         logInfo("Control enabled set to: \(enabled)")
@@ -142,6 +173,7 @@ final class ControllerManager {
 
     deinit {
         stopInputLoop()
+        stopAllRepeatingButtons(reason: "controller_manager_deinit")
         stopASRAutoStartedProcessIfNeeded(reason: "controller_manager_deinit")
         hideControllerActionHintIfVisible(reason: "controller_manager_deinit")
         voiceInputController.stopCapture(trigger: "controller_manager_deinit")
@@ -168,6 +200,8 @@ final class ControllerManager {
         leftY: Float,
         rightX: Float = 0,
         rightY: Float = 0,
+        touchpadX: Float = 0,
+        touchpadY: Float = 0,
         leftTrigger: Float,
         rightTrigger: Float
     ) {
@@ -177,21 +211,207 @@ final class ControllerManager {
         _ = rightTrigger
 
         handleLeftThumbstickWheel(leftX: leftX, leftY: leftY)
-
-        let filteredRightX = normalizedThumbstickValue(rightX)
-        let filteredRightY = normalizedThumbstickValue(rightY)
-
-        if filteredRightX != 0 || filteredRightY != 0 {
-            mouseBridge.moveCursor(
-                normalizedX: Double(filteredRightX),
-                normalizedY: Double(filteredRightY)
-            )
-        }
-
+        handleTouchpadFrame(
+            primaryX: touchpadX,
+            primaryY: touchpadY,
+            secondaryX: rightX,
+            secondaryY: rightY
+        )
     }
 
     func normalizedThumbstickValue(_ raw: Float) -> Float {
         abs(raw) >= Self.deadzone ? raw : 0
+    }
+
+    private func handleTouchpadFrame(primaryX: Float, primaryY: Float, secondaryX: Float, secondaryY: Float) {
+        let now = Date()
+        let hasPrimaryTouch = isTouchpadFingerActive(x: primaryX, y: primaryY)
+        let hasSecondaryTouch = isTouchpadFingerActive(x: secondaryX, y: secondaryY)
+        let isTouching = hasPrimaryTouch || hasSecondaryTouch
+
+        updateTouchpadLiftSuppression(isTouching: isTouching, now: now)
+
+        if isTouchpadSuppressed(isTouching: isTouching, now: now) {
+            setTouchpadMode(.suppressed)
+            touchpadLastPrimaryPosition = hasPrimaryTouch ? (primaryX, primaryY) : nil
+            touchpadLastTwoFingerAverageY = hasPrimaryTouch && hasSecondaryTouch ? ((primaryY + secondaryY) / 2) : nil
+            logDebug("touchpad_lift_suppressed")
+            return
+        }
+
+        guard isTouching else {
+            touchpadMoveActive = false
+            touchpadScrollRemainder = 0
+            touchpadLastPrimaryPosition = nil
+            touchpadLastTwoFingerAverageY = nil
+            setTouchpadMode(.idle)
+            return
+        }
+
+        if hasPrimaryTouch && hasSecondaryTouch {
+            touchpadMoveActive = false
+            touchpadLastPrimaryPosition = nil
+            setTouchpadMode(.scroll)
+            applyTouchpadTwoFingerScroll(primaryY: primaryY, secondaryY: secondaryY)
+            return
+        }
+
+        guard hasPrimaryTouch else {
+            touchpadLastPrimaryPosition = nil
+            touchpadLastTwoFingerAverageY = nil
+            setTouchpadMode(.idle)
+            return
+        }
+
+        touchpadScrollRemainder = 0
+        touchpadLastTwoFingerAverageY = nil
+        setTouchpadMode(.move)
+        applyTouchpadMove(currentX: primaryX, currentY: primaryY)
+    }
+
+    private func applyTouchpadMove(currentX: Float, currentY: Float) {
+        guard let previous = touchpadLastPrimaryPosition else {
+            touchpadLastPrimaryPosition = (currentX, currentY)
+            return
+        }
+
+        touchpadLastPrimaryPosition = (currentX, currentY)
+
+        let deltaX = currentX - previous.x
+        let deltaY = currentY - previous.y
+
+        guard let filtered = filteredTouchpadMove(rawX: deltaX, rawY: deltaY) else {
+            return
+        }
+
+        let pointerSensitivity = configuration.touchpad.pointerSensitivity
+        mouseBridge.moveCursor(
+            normalizedX: Double(filtered.x * pointerSensitivity),
+            normalizedY: Double(filtered.y * pointerSensitivity)
+        )
+    }
+
+    private func filteredTouchpadMove(rawX: Float, rawY: Float) -> (x: Float, y: Float)? {
+        let magnitude = sqrt((rawX * rawX) + (rawY * rawY))
+        guard magnitude > 0 else {
+            touchpadMoveActive = false
+            return nil
+        }
+
+        let deadzone: Float
+        if touchpadMoveActive {
+            deadzone = Self.touchpadMoveExitDeadzone
+            guard magnitude >= deadzone else {
+                touchpadMoveActive = false
+                return nil
+            }
+        } else {
+            deadzone = Self.touchpadMoveEnterDeadzone
+            guard magnitude >= deadzone else {
+                return nil
+            }
+            touchpadMoveActive = true
+        }
+
+        let normalizedMagnitude = normalizeTouchpadMagnitude(magnitude, deadzone: deadzone)
+        let curvedMagnitude = pow(normalizedMagnitude, Self.touchpadMoveCurveGamma)
+        let scale = curvedMagnitude / magnitude
+
+        return (x: rawX * scale, y: rawY * scale)
+    }
+
+    private func applyTouchpadTwoFingerScroll(primaryY: Float, secondaryY: Float) {
+        let averagedY = (primaryY + secondaryY) / 2
+
+        guard let previousAveragedY = touchpadLastTwoFingerAverageY else {
+            touchpadLastTwoFingerAverageY = averagedY
+            return
+        }
+
+        touchpadLastTwoFingerAverageY = averagedY
+
+        let deltaY = averagedY - previousAveragedY
+        let magnitude = abs(deltaY)
+        guard magnitude >= Self.touchpadScrollDeadzone else {
+            return
+        }
+
+        let normalized = normalizeTouchpadMagnitude(magnitude, deadzone: Self.touchpadScrollDeadzone)
+        let signedNormalized = deltaY < 0 ? -normalized : normalized
+        let scrollSensitivity = configuration.touchpad.scrollSensitivity
+        let deltaLines = Double(signedNormalized * Self.touchpadScrollLinesPerTick * scrollSensitivity)
+
+        touchpadScrollRemainder += deltaLines
+        let wholeLines = Int32(touchpadScrollRemainder.rounded(.towardZero))
+        guard wholeLines != 0 else {
+            return
+        }
+
+        touchpadScrollRemainder -= Double(wholeLines)
+        mouseBridge.scroll(lines: wholeLines)
+    }
+
+    private func normalizeTouchpadMagnitude(_ magnitude: Float, deadzone: Float) -> Float {
+        let clampedDeadzone = min(max(deadzone, 0), 0.95)
+        guard magnitude > clampedDeadzone else {
+            return 0
+        }
+
+        let normalized = (magnitude - clampedDeadzone) / (1 - clampedDeadzone)
+        return min(max(normalized, 0), 1)
+    }
+
+    private func isTouchpadFingerActive(x: Float, y: Float) -> Bool {
+        let magnitude = sqrt((x * x) + (y * y))
+        return magnitude >= Self.touchpadContactThreshold
+    }
+
+    private func updateTouchpadLiftSuppression(isTouching: Bool, now: Date) {
+        if !isTouching && touchpadWasTouching {
+            touchpadLiftSuppressionUntil = now.addingTimeInterval(Self.touchpadLiftSuppressionSeconds)
+            touchpadMoveActive = false
+            touchpadScrollRemainder = 0
+            touchpadLastPrimaryPosition = nil
+            touchpadLastTwoFingerAverageY = nil
+            logInfo("touchpad_lift_detected suppression_ms=\(Int(Self.touchpadLiftSuppressionSeconds * 1000))")
+        }
+
+        touchpadWasTouching = isTouching
+    }
+
+    private func isTouchpadSuppressed(isTouching: Bool, now: Date) -> Bool {
+        guard let suppressionUntil = touchpadLiftSuppressionUntil else {
+            return false
+        }
+
+        if now < suppressionUntil {
+            return isTouching
+        }
+
+        touchpadLiftSuppressionUntil = nil
+        return false
+    }
+
+    private func resetTouchpadState(reason: String) {
+        touchpadMoveActive = false
+        touchpadWasTouching = false
+        touchpadLiftSuppressionUntil = nil
+        touchpadScrollRemainder = 0
+        touchpadLastPrimaryPosition = nil
+        touchpadLastTwoFingerAverageY = nil
+        setTouchpadMode(.idle)
+        logInfo("touchpad_state_reset reason=\(reason)")
+    }
+
+    private func setTouchpadMode(_ mode: TouchpadMode) {
+        guard touchpadMode != mode else { return }
+
+        let involvesScroll = touchpadMode == .scroll || mode == .scroll
+        if !involvesScroll {
+            logInfo("touchpad_mode_change from=\(touchpadMode.rawValue) to=\(mode.rawValue)")
+        }
+
+        touchpadMode = mode
     }
 
     private func setupObservers() {
@@ -252,6 +472,8 @@ final class ControllerManager {
         connectionState = .disconnected
         hideWheelIfVisible(reason: "controller_disconnected")
         hideControllerActionHintIfVisible(reason: "controller_disconnected")
+        stopAllRepeatingButtons(reason: "controller_disconnected")
+        resetTouchpadState(reason: "controller_disconnected")
 
         // Try switching to another connected controller immediately.
         attachFirstAvailableController()
@@ -329,6 +551,28 @@ final class ControllerManager {
                 self?.handleButtonInput(.buttonHome, isPressed: pressed)
             }
         }
+
+        configureTouchpadButtonHandler(for: controller)
+    }
+
+    private func configureTouchpadButtonHandler(for controller: GCController) {
+        if let dualSense = controller.physicalInputProfile as? GCDualSenseGamepad {
+            dualSense.touchpadButton.pressedChangedHandler = { [weak self] _, _, pressed in
+                self?.handleButtonInput(.touchpadButton, isPressed: pressed)
+            }
+            logInfo("touchpad_button_handler_configured profile=dualSense")
+            return
+        }
+
+        if let dualShock = controller.physicalInputProfile as? GCDualShockGamepad {
+            dualShock.touchpadButton.pressedChangedHandler = { [weak self] _, _, pressed in
+                self?.handleButtonInput(.touchpadButton, isPressed: pressed)
+            }
+            logInfo("touchpad_button_handler_configured profile=dualShock")
+            return
+        }
+
+        logDebug("touchpad_button_handler_unavailable")
     }
 
     func handleButtonInput(_ button: ControllerButton, isPressed: Bool) {
@@ -349,6 +593,10 @@ final class ControllerManager {
             return
         }
 
+        if handleRepeatableButton(button, isPressed: isPressed) {
+            return
+        }
+
         guard isPressed else { return }
 
         guard let binding = configuration.buttons[button] else {
@@ -356,8 +604,85 @@ final class ControllerManager {
             return
         }
 
-        logInfo("button_pressed button=\(button.rawValue) script=\(binding.name) command=\(binding.command)")
+        executeButtonScript(button, binding: binding, event: "button_pressed")
+    }
+
+    private func handleRepeatableButton(_ button: ControllerButton, isPressed: Bool) -> Bool {
+        guard Self.repeatableButtons.contains(button) else {
+            return false
+        }
+
+        if !isPressed {
+            stopRepeatingButton(button, reason: "released")
+            return true
+        }
+
+        if repeatingButtonTimers[button] != nil {
+            return true
+        }
+
+        guard let binding = configuration.buttons[button] else {
+            logDebug("No configured script for repeatable button=\(button.rawValue)")
+            return true
+        }
+
+        executeButtonScript(button, binding: binding, event: "button_pressed")
+        startRepeatingButton(button)
+        return true
+    }
+
+    private func executeButtonScript(_ button: ControllerButton, binding: ScriptBinding, event: String) {
+        logInfo("\(event) button=\(button.rawValue) script=\(binding.name) command=\(binding.command)")
         scriptExecutor.execute(binding: binding, trigger: "button.\(button.rawValue)")
+    }
+
+    private func startRepeatingButton(_ button: ControllerButton) {
+        guard repeatingButtonTimers[button] == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + triggerRepeatInitialDelay,
+            repeating: triggerRepeatInterval
+        )
+
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+
+            guard self.isControlEnabled else {
+                self.stopRepeatingButton(button, reason: "control_disabled")
+                return
+            }
+
+            guard let binding = self.configuration.buttons[button] else {
+                self.logDebug("repeat_button_binding_missing button=\(button.rawValue)")
+                self.stopRepeatingButton(button, reason: "binding_missing")
+                return
+            }
+
+            self.scriptExecutor.execute(binding: binding, trigger: "button.\(button.rawValue)")
+        }
+
+        repeatingButtonTimers[button] = timer
+        timer.resume()
+        logInfo("button_repeat_start button=\(button.rawValue) initialDelay=\(triggerRepeatInitialDelay) interval=\(triggerRepeatInterval)")
+    }
+
+    private func stopRepeatingButton(_ button: ControllerButton, reason: String) {
+        guard let timer = repeatingButtonTimers.removeValue(forKey: button) else {
+            return
+        }
+
+        timer.cancel()
+        logInfo("button_repeat_stop button=\(button.rawValue) reason=\(reason)")
+    }
+
+    private func stopAllRepeatingButtons(reason: String) {
+        let buttons = Array(repeatingButtonTimers.keys)
+        guard !buttons.isEmpty else { return }
+
+        for button in buttons {
+            stopRepeatingButton(button, reason: reason)
+        }
     }
 
     private func handleControllerActionHintButton(_ button: ControllerButton, isPressed: Bool) -> Bool {
@@ -404,7 +729,7 @@ final class ControllerManager {
             return "Hold to show this overlay"
         }
 
-        if button == .rightThumbstickButton {
+        if button == .touchpadButton {
             return "Left Click"
         }
 
@@ -512,7 +837,7 @@ final class ControllerManager {
     }
 
     private func handleFixedClickButton(_ button: ControllerButton, isPressed: Bool) -> Bool {
-        guard button == .rightThumbstickButton else {
+        guard button == .touchpadButton else {
             return false
         }
 
@@ -521,7 +846,7 @@ final class ControllerManager {
         }
 
         mouseBridge.leftClick()
-        logInfo("right_thumbstick_button_left_click")
+        logInfo("touchpad_button_left_click")
         return true
     }
 
@@ -530,13 +855,13 @@ final class ControllerManager {
         let threshold = configuration.leftThumbstickWheel.activationThreshold
         let slots = configuration.leftThumbstickWheel.slots
 
-        guard slots.count == 6 else {
+        guard slots.count >= 2 else {
             logDebug("Wheel config invalid slot count: \(slots.count)")
             return
         }
 
         if magnitude >= threshold {
-            let index = wheelSlotIndex(leftX: leftX, leftY: leftY)
+            let index = wheelSlotIndex(leftX: leftX, leftY: leftY, slotCount: slots.count)
 
             if !isWheelVisible {
                 isWheelVisible = true
@@ -582,11 +907,12 @@ final class ControllerManager {
         scriptExecutor.execute(binding: binding, trigger: "leftThumbstick.slot\(selectedWheelSlotIndex + 1)")
     }
 
-    private func wheelSlotIndex(leftX: Float, leftY: Float) -> Int {
+    private func wheelSlotIndex(leftX: Float, leftY: Float, slotCount: Int) -> Int {
         let angleFromXAxis = atan2(Double(leftY), Double(leftX)) * 180 / Double.pi
         let clockwiseFromUp = fmod((90.0 - angleFromXAxis + 360.0), 360.0)
-        let shifted = fmod(clockwiseFromUp + 30.0, 360.0)
-        return Int(shifted / 60.0)
+        let segmentSize = 360.0 / Double(slotCount)
+        let shifted = fmod(clockwiseFromUp + (segmentSize / 2), 360.0)
+        return Int(shifted / segmentSize)
     }
 
     private func hideWheelIfVisible(reason: String) {
@@ -619,14 +945,44 @@ final class ControllerManager {
     private func processContinuousInput() {
         guard let gamepad = currentController?.extendedGamepad else { return }
 
+        let touchpadInput = resolveTouchpadInput(from: currentController)
+
         processInput(
             leftX: gamepad.leftThumbstick.xAxis.value,
             leftY: gamepad.leftThumbstick.yAxis.value,
-            rightX: gamepad.rightThumbstick.xAxis.value,
-            rightY: gamepad.rightThumbstick.yAxis.value,
+            rightX: touchpadInput.secondaryX,
+            rightY: touchpadInput.secondaryY,
+            touchpadX: touchpadInput.primaryX,
+            touchpadY: touchpadInput.primaryY,
             leftTrigger: gamepad.leftTrigger.value,
             rightTrigger: gamepad.rightTrigger.value
         )
+    }
+
+    private func resolveTouchpadInput(from controller: GCController?) -> (primaryX: Float, primaryY: Float, secondaryX: Float, secondaryY: Float) {
+        guard let controller else {
+            return (0, 0, 0, 0)
+        }
+
+        if let dualSense = controller.physicalInputProfile as? GCDualSenseGamepad {
+            return (
+                dualSense.touchpadPrimary.xAxis.value,
+                dualSense.touchpadPrimary.yAxis.value,
+                dualSense.touchpadSecondary.xAxis.value,
+                dualSense.touchpadSecondary.yAxis.value
+            )
+        }
+
+        if let dualShock = controller.physicalInputProfile as? GCDualShockGamepad {
+            return (
+                dualShock.touchpadPrimary.xAxis.value,
+                dualShock.touchpadPrimary.yAxis.value,
+                dualShock.touchpadSecondary.xAxis.value,
+                dualShock.touchpadSecondary.yAxis.value
+            )
+        }
+
+        return (0, 0, 0, 0)
     }
 
     private enum ASRAutoStartStatus {
@@ -637,47 +993,7 @@ final class ControllerManager {
     }
 
     private func applyRuntimeVoiceInputAdjustments(_ configuration: ControllerConfiguration) -> ControllerConfiguration {
-        guard let voiceInput = configuration.voiceInput else {
-            return configuration
-        }
-
-        let asrServer = voiceInput.asrServer
-        guard voiceInput.enabled,
-              asrServer.autoStart else {
-            return configuration
-        }
-
-        if asrServer.apiKey == Self.fixedASRAutoStartAPIKey {
-            return configuration
-        }
-
-        let updatedASRServer = VoiceInputASRServerConfiguration(
-            baseURL: asrServer.baseURL,
-            apiKey: Self.fixedASRAutoStartAPIKey,
-            model: asrServer.model,
-            timeoutSeconds: asrServer.timeoutSeconds,
-            autoStart: asrServer.autoStart,
-            launchExecutable: asrServer.launchExecutable,
-            launchArguments: asrServer.launchArguments
-        )
-
-        let updatedVoiceInput = VoiceInputConfiguration(
-            enabled: voiceInput.enabled,
-            activationButton: voiceInput.activationButton,
-            asrServer: updatedASRServer
-        )
-
-        if asrServer.apiKey.isEmpty {
-            logInfo("asr_auto_start_apply_fixed_api_key value=\(Self.fixedASRAutoStartAPIKey)")
-        } else {
-            logInfo("asr_auto_start_override_api_key with fixed value=\(Self.fixedASRAutoStartAPIKey)")
-        }
-
-        return ControllerConfiguration(
-            buttons: configuration.buttons,
-            leftThumbstickWheel: configuration.leftThumbstickWheel,
-            voiceInput: updatedVoiceInput
-        )
+        configuration
     }
 
     private func runDependencyChecks() {
@@ -783,10 +1099,6 @@ final class ControllerManager {
             stopASRAutoStartedProcessIfNeeded(reason: "asr_auto_start_disabled")
         }
 
-        if asrServer.apiKey.isEmpty, !asrServer.autoStart {
-            issues.append("voiceInput.asrServer.apiKey is empty")
-        }
-
         guard let asrBaseURL = URL(string: asrServer.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             issues.append("Invalid ASR baseURL: \(asrServer.baseURL)")
             return issues
@@ -834,26 +1146,14 @@ final class ControllerManager {
             return .alreadyRunning
         }
 
-        guard !asrServer.apiKey.isEmpty else {
-            return .failed("voiceInput.asrServer.apiKey is empty")
-        }
-
         guard let executablePath = resolveExecutablePath(asrServer.launchExecutable) else {
             return .failed("Cannot find launch executable: \(asrServer.launchExecutable)")
         }
 
         var arguments = normalizedASRAutoStartArguments(asrServer)
 
-        if !containsCLIOption(arguments, "--job-ttl") {
-            arguments.append(contentsOf: ["--job-ttl", String(Self.defaultASRJobTTLSeconds)])
-        }
-
-        if !containsCLIOption(arguments, "--api-key") {
-            arguments.append(contentsOf: ["--api-key", asrServer.apiKey])
-        }
-
-        if !containsCLIOption(arguments, "--model") {
-            arguments.append(contentsOf: ["--model", asrServer.model])
+        guard containsCLIOption(arguments, "--model-dir") else {
+            return .failed("Missing required --model-dir in voiceInput.asrServer.launchArguments")
         }
 
         if let hostPort = asrHostPort(fromBaseURLText: asrServer.baseURL) {
@@ -954,11 +1254,9 @@ final class ControllerManager {
     }
 
     private func normalizedASRAutoStartArguments(_ asrServer: VoiceInputASRServerConfiguration) -> [String] {
-        let normalized = asrServer.launchArguments
+        asrServer.launchArguments
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-
-        return normalized.isEmpty ? ["serve", "--job-ttl", String(Self.defaultASRJobTTLSeconds)] : normalized
     }
 
     private func containsCLIOption(_ arguments: [String], _ option: String) -> Bool {
@@ -1042,57 +1340,221 @@ final class ControllerManager {
     }
 
     private func commandSegments(_ command: String) -> [String] {
-        command
-            .split(whereSeparator: { $0 == ";" || $0 == "\n" })
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        var segments: [String] = []
+        var current = ""
+        var isSingleQuoted = false
+        var isDoubleQuoted = false
+        var isEscaped = false
+        var commandSubstitutionDepth = 0
+
+        let characters = Array(command)
+        var index = 0
+
+        func flushSegment() {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                segments.append(trimmed)
+            }
+            current.removeAll(keepingCapacity: true)
+        }
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                index += 1
+                continue
+            }
+
+            if character == "\\" && !isSingleQuoted {
+                current.append(character)
+                isEscaped = true
+                index += 1
+                continue
+            }
+
+            if character == "'" && !isDoubleQuoted && commandSubstitutionDepth == 0 {
+                isSingleQuoted.toggle()
+                current.append(character)
+                index += 1
+                continue
+            }
+
+            if character == "\"" && !isSingleQuoted && commandSubstitutionDepth == 0 {
+                isDoubleQuoted.toggle()
+                current.append(character)
+                index += 1
+                continue
+            }
+
+            if !isSingleQuoted {
+                if character == "(" && index > 0 && characters[index - 1] == "$" {
+                    commandSubstitutionDepth += 1
+                } else if character == ")" && commandSubstitutionDepth > 0 {
+                    commandSubstitutionDepth -= 1
+                }
+            }
+
+            let isTopLevel = !isSingleQuoted && !isDoubleQuoted && commandSubstitutionDepth == 0
+            if isTopLevel {
+                if character == ";" || character == "\n" {
+                    flushSegment()
+                    index += 1
+                    continue
+                }
+
+                if character == "&", index + 1 < characters.count, characters[index + 1] == "&" {
+                    flushSegment()
+                    index += 2
+                    continue
+                }
+
+                if character == "|", index + 1 < characters.count, characters[index + 1] == "|" {
+                    flushSegment()
+                    index += 2
+                    continue
+                }
+
+                if character == "|" {
+                    flushSegment()
+                    index += 1
+                    continue
+                }
+            }
+
+            current.append(character)
+            index += 1
+        }
+
+        flushSegment()
+        return segments
     }
 
     private func executableCandidate(from commandSegment: String) -> String? {
-        let trimmed = commandSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        var remainder = commandSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remainder.isEmpty else {
+            return nil
+        }
+
+        while let firstWord = firstShellWord(from: remainder) {
+            remainder = firstWord.remainder
+
+            if isShellAssignmentWord(firstWord.word) {
+                continue
+            }
+
+            let cleaned = firstWord.word.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+            guard !cleaned.isEmpty else {
+                return nil
+            }
+
+            // Skip shell grouping / test operator tokens like "([" that are not executables.
+            if cleaned.range(of: "[A-Za-z0-9/_\\.~-]", options: .regularExpression) == nil {
+                continue
+            }
+
+            if cleaned.hasPrefix("$(") || cleaned.hasPrefix("${") || cleaned.hasPrefix("$.") || cleaned.hasPrefix("-") {
+                return nil
+            }
+
+            if Self.shellBuiltins.contains(cleaned) {
+                return nil
+            }
+
+            return cleaned
+        }
+
+        return nil
+    }
+
+    private func firstShellWord(from text: String) -> (word: String, remainder: String)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return nil
         }
 
-        var segment = trimmed
+        var word = ""
+        var isSingleQuoted = false
+        var isDoubleQuoted = false
+        var isEscaped = false
+        var commandSubstitutionDepth = 0
 
-        while let spaceIndex = segment.firstIndex(of: " ") {
-            let token = String(segment[..<spaceIndex])
-            if token.contains("=") && !token.hasPrefix("/") {
-                segment = String(segment[segment.index(after: spaceIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let characters = Array(trimmed)
+        var index = 0
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if isEscaped {
+                word.append(character)
+                isEscaped = false
+                index += 1
                 continue
             }
-            break
-        }
 
-        if segment.hasPrefix("\"") {
-            let remainder = segment.dropFirst()
-            guard let endQuote = remainder.firstIndex(of: "\"") else {
-                return nil
+            if character == "\\" && !isSingleQuoted {
+                word.append(character)
+                isEscaped = true
+                index += 1
+                continue
             }
-            let value = String(remainder[..<endQuote])
-            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if character == "'" && !isDoubleQuoted && commandSubstitutionDepth == 0 {
+                isSingleQuoted.toggle()
+                word.append(character)
+                index += 1
+                continue
+            }
+
+            if character == "\"" && !isSingleQuoted && commandSubstitutionDepth == 0 {
+                isDoubleQuoted.toggle()
+                word.append(character)
+                index += 1
+                continue
+            }
+
+            if !isSingleQuoted {
+                if character == "(" && index > 0 && characters[index - 1] == "$" {
+                    commandSubstitutionDepth += 1
+                } else if character == ")" && commandSubstitutionDepth > 0 {
+                    commandSubstitutionDepth -= 1
+                }
+            }
+
+            let isTopLevel = !isSingleQuoted && !isDoubleQuoted && commandSubstitutionDepth == 0
+            if isTopLevel && character.isWhitespace {
+                break
+            }
+
+            word.append(character)
+            index += 1
         }
 
-        let token = segment.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? ""
-        guard !token.isEmpty else {
-            return nil
+        let remainder = index < characters.count
+            ? String(characters[(index + 1)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+
+        return (word: word, remainder: remainder)
+    }
+
+    private func isShellAssignmentWord(_ token: String) -> Bool {
+        guard let equalIndex = token.firstIndex(of: "=") else {
+            return false
         }
 
-        if token.hasPrefix("$(") {
-            return nil
+        let name = token[..<equalIndex]
+        guard !name.isEmpty else {
+            return false
         }
 
-        let cleaned = token.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
-        guard !cleaned.isEmpty else {
-            return nil
+        guard let firstCharacter = name.first,
+              firstCharacter == "_" || firstCharacter.isLetter else {
+            return false
         }
 
-        if Self.shellBuiltins.contains(cleaned) {
-            return nil
-        }
-
-        return cleaned
+        return name.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
     }
 
     private func isExecutableFile(atAbsolutePath path: String) -> Bool {

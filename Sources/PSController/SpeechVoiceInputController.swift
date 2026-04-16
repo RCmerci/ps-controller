@@ -117,12 +117,6 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
 
         cancelActiveTranscriptionLocked(reason: "new_capture_start")
 
-        let asrServer = voiceInputConfiguration.asrServer
-        if asrServer.apiKey.isEmpty {
-            logError("voice_start_blocked reason=missing_asr_api_key trigger=\(trigger)")
-            return
-        }
-
         let captureID = UUID()
         let captureFileURL = makeCaptureFileURL(captureID: captureID)
 
@@ -300,10 +294,11 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         }
 
         let responseText = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let rawResponseBody = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        logInfo("voice_transcription_response_raw requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let bodyPreview = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-            logError("voice_transcription_failed reason=http_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) status=\(httpResponse.statusCode) body=\(bodyPreview)")
+            logError("voice_transcription_failed reason=http_error requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) status=\(httpResponse.statusCode) body=\(rawResponseBody)")
             return
         }
 
@@ -314,10 +309,10 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             return
         }
 
-        let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcript = normalizeASRTranscriptText(text)
 
         guard !transcript.isEmpty else {
-            logInfo("voice_transcription_empty requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString)")
+            logInfo("voice_transcription_filtered requestID=\(requestID.uuidString) captureID=\(capture.id.uuidString) reason=missing_asr_text_marker_or_empty_payload")
             return
         }
 
@@ -378,7 +373,25 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         }
 
         let language = String(languageSubtag).lowercased()
-        return language.isEmpty ? nil : language
+        switch language {
+        case "zh":
+            return "chinese"
+        case "en":
+            return "english"
+        default:
+            return language.isEmpty ? nil : language
+        }
+    }
+
+    private func normalizeASRTranscriptText(_ rawText: String) -> String {
+        let normalized = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let markerRange = normalized.range(of: "<asr_text>", options: .backwards) else {
+            return ""
+        }
+
+        let contentAfterMarker = String(normalized[markerRange.upperBound...])
+        return contentAfterMarker.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func buildTranscriptionRequest(
@@ -393,7 +406,12 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         request.timeoutInterval = asrServer.timeoutSeconds
-        request.setValue("Bearer \(asrServer.apiKey)", forHTTPHeaderField: "Authorization")
+
+        let trimmedAPIKey = asrServer.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedAPIKey.isEmpty {
+            request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
+        }
+
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 

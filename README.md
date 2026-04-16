@@ -17,7 +17,7 @@ Use a PlayStation controller to control macOS cursor actions.
 - USB connection for the controller (Bluetooth is intentionally not supported)
 - Accessibility permission (required for event injection)
 - Microphone permission (required for voice capture)
-- `mlx-qwen3-asr` HTTP server running (required for transcription)
+- `qwen3-asr-rs` `asr-server` running (required for transcription)
 
 ## Build
 
@@ -42,7 +42,7 @@ If `voiceInput.enabled` is on, also grant:
 
 Then restart the app.
 
-Voice transcription is processed by a local `mlx-qwen3-asr` HTTP server (not CLI mode).
+Voice transcription is processed by a local `qwen3-asr-rs` `asr-server` over its OpenAI-compatible HTTP API.
 
 ## Controller connection (USB only)
 
@@ -74,13 +74,37 @@ Supported button keys:
 - `leftShoulder`, `rightShoulder`
 - `leftTrigger`, `rightTrigger`
 - `leftThumbstickButton`, `rightThumbstickButton`
+- `touchpadButton` (PlayStation touchpad click)
 - `buttonMenu`, `buttonOptions`, `buttonHome`
 
 Reserved runtime behaviors (not script-mapped):
 
 - `buttonMenu`: hold to show an on-screen overlay listing all controller buttons and their current runtime function/script name; release to hide.
-- `rightThumbstickButton`: always triggers one left click on press.
+- `touchpadButton`: always triggers one left click on press.
 - When `voiceInput.enabled=true`: `buttonB` is reserved for voice capture.
+
+### Touchpad pointer behavior
+
+- **Single-finger touch** on the touchpad controls cursor movement.
+- **Two-finger touch** on the touchpad switches to scroll mode.
+- Cursor movement uses a **deadzone with hysteresis** to reduce drift (`enter` > `exit`).
+- Cursor movement also uses a **non-linear sensitivity curve** (instead of raw linear scaling).
+- Touch and click are separated: moving a finger on the touchpad does not click; only `touchpadButton` press triggers left click.
+- After lift-off, a short **spike suppression window** ignores abrupt values to avoid jumpy cursor behavior.
+- You can tune touchpad sensitivity in config:
+  - `touchpad.pointerSensitivity` (single-finger cursor movement multiplier)
+  - `touchpad.scrollSensitivity` (two-finger scroll multiplier)
+
+Example:
+
+```json
+{
+  "touchpad": {
+    "pointerSensitivity": 2.4,
+    "scrollSensitivity": 3.0
+  }
+}
+```
 
 ### Voice input (press-and-hold)
 
@@ -93,12 +117,12 @@ You can enable controller-triggered voice transcription with `voiceInput`:
     "activationButton": "buttonOptions",
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
-      "apiKey": "ps-controller-mlx-qwen3-asr",
+      "apiKey": "",
       "model": "Qwen/Qwen3-ASR-0.6B",
       "timeoutSeconds": 30,
       "autoStart": true,
-      "launchExecutable": "mlx-qwen3-asr",
-      "launchArguments": ["serve", "--job-ttl", "120"]
+      "launchExecutable": "/Users/rcmerci/qwen3_asr_rs/asr-server",
+      "launchArguments": ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"]
     }
   }
 }
@@ -108,7 +132,7 @@ Runtime behavior:
 
 1. Press and hold `buttonB` to start `zh-CN` voice capture.
 2. Release `buttonB` to stop capture.
-3. Captured audio is sent to `mlx-qwen3-asr` HTTP server via `POST /v1/audio/transcriptions`.
+3. Captured audio is sent to `qwen3-asr-rs` server via `POST /v1/audio/transcriptions` (OpenAI-compatible API).
 4. The ASR transcript is corrected with a local replacement dictionary.
 5. Final text is inserted into the currently focused text cursor.
 6. Detailed voice/dictionary state is emitted into app logs (`voice_input_*` / `voice_dictionary_*`).
@@ -144,30 +168,32 @@ Notes:
 - Bluetooth controller microphone is not supported by this project.
 - When `voiceInput.enabled` is `true`, `buttonB` is reserved for voice capture and its script mapping is skipped.
 - `voiceInput.activationButton` is kept in config for backward compatibility but is currently ignored at runtime.
-- `voiceInput.asrServer.baseURL` should point to your local `mlx-qwen3-asr` server root URL (for example `http://127.0.0.1:8765`).
-- `voiceInput.asrServer.apiKey` must match the server Bearer token.
+- `voiceInput.asrServer.baseURL` should point to your local `qwen3-asr-rs` server root URL (for example `http://127.0.0.1:8765`).
+- `voiceInput.asrServer.apiKey` is optional for local `qwen3-asr-rs`; leave empty unless your proxy/service requires Bearer auth.
 - Set `voiceInput.asrServer.autoStart=true` if you want app-managed server startup.
-- When `autoStart=true`, the app uses a fixed API key: `ps-controller-mlx-qwen3-asr` for both server launch and client requests.
-- `voiceInput.asrServer.launchExecutable` and `launchArguments` control how the app launches the server process (default includes `--job-ttl 120` to keep job state for 2 minutes).
-- This project intentionally uses the `mlx-qwen3-asr` **HTTP server mode**, not per-request CLI transcription mode, to avoid model reload on every transcription.
+- `voiceInput.asrServer.launchExecutable` and `launchArguments` control how the app launches the server process.
+- For `qwen3-asr-rs`, `--model-dir` is required in `launchArguments`.
+- This project intentionally uses an OpenAI-compatible **HTTP server mode** (`POST /v1/audio/transcriptions`), not per-request CLI transcription mode, to avoid model reload on every transcription.
 - Startup dependency issues (missing command/config/service) are shown in the menu bar dropdown under `Dependencies`.
 
 If auto-start fails (missing executable/permission/invalid args), the issue is shown under menu bar `Dependencies` and you can fall back to manual startup.
 
-Prepare local `mlx-qwen3-asr` server:
+Prepare local `qwen3-asr-rs` server:
 
 ```bash
-pip install "mlx-qwen3-asr[serve]"
-mlx-qwen3-asr serve --api-key ps-controller-mlx-qwen3-asr --job-ttl 120
+"/Users/rcmerci/qwen3_asr_rs/asr-server" \
+  --model-dir "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B" \
+  --host 127.0.0.1 \
+  --port 8765
 ```
 
-### Left thumbstick wheel (6 slots)
+### Left thumbstick wheel (5 slots)
 
 `leftThumbstickWheel` config controls a GTA-style radial chooser:
 
 - `activationThreshold`: how far the stick must move to open/select.
-- `slots`: exactly 6 slots (`title` + optional `script`).
-- Default config includes one `Cancel` slot (slot 6, no script).
+- `slots`: exactly 5 slots (`title` + optional `script`).
+- Default config includes one `Cancel` slot (slot 5, no script).
 
 Runtime behavior:
 
@@ -175,7 +201,9 @@ Runtime behavior:
 2. Stick direction and highlighted slot are angle-aligned (top -> slot 1, then clockwise).
 3. Return stick to center to confirm. If the slot has no script (for example `Cancel`), nothing is executed.
 
-Mouse cursor movement is controlled by **right thumbstick**.
+Mouse cursor movement is controlled by the **touchpad primary finger**.
+Two-finger touchpad gesture performs wheel scrolling.
+Right thumbstick movement no longer controls the mouse cursor.
 
 ## Notes
 

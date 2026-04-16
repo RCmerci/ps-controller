@@ -18,6 +18,7 @@ enum ControllerButton: String, CaseIterable, Codable {
 
     case leftThumbstickButton
     case rightThumbstickButton
+    case touchpadButton
 
     case buttonMenu
     case buttonOptions
@@ -56,6 +57,42 @@ struct LeftThumbstickWheelConfiguration: Codable, Equatable {
     }
 }
 
+struct TouchpadConfiguration: Codable, Equatable {
+    let pointerSensitivity: Float
+    let scrollSensitivity: Float
+
+    private enum CodingKeys: String, CodingKey {
+        case pointerSensitivity
+        case scrollSensitivity
+    }
+
+    init(pointerSensitivity: Float = 1.0, scrollSensitivity: Float = 1.0) {
+        self.pointerSensitivity = pointerSensitivity
+        self.scrollSensitivity = scrollSensitivity
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.pointerSensitivity = try container.decodeIfPresent(Float.self, forKey: .pointerSensitivity) ?? Self.default.pointerSensitivity
+        self.scrollSensitivity = try container.decodeIfPresent(Float.self, forKey: .scrollSensitivity) ?? Self.default.scrollSensitivity
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(pointerSensitivity, forKey: .pointerSensitivity)
+        try container.encode(scrollSensitivity, forKey: .scrollSensitivity)
+    }
+
+    static let `default` = TouchpadConfiguration()
+
+    func normalizedForRuntime() -> TouchpadConfiguration {
+        TouchpadConfiguration(
+            pointerSensitivity: min(max(pointerSensitivity, 0.2), 100.0),
+            scrollSensitivity: min(max(scrollSensitivity, 0.2), 100.0)
+        )
+    }
+}
+
 struct VoiceInputASRServerConfiguration: Codable, Equatable {
     let baseURL: String
     let apiKey: String
@@ -77,12 +114,12 @@ struct VoiceInputASRServerConfiguration: Codable, Equatable {
 
     init(
         baseURL: String = "http://127.0.0.1:8765",
-        apiKey: String = "ps-controller-mlx-qwen3-asr",
+        apiKey: String = "",
         model: String = "Qwen/Qwen3-ASR-0.6B",
         timeoutSeconds: TimeInterval = 30,
         autoStart: Bool = false,
-        launchExecutable: String = "mlx-qwen3-asr",
-        launchArguments: [String] = ["serve", "--job-ttl", "120"]
+        launchExecutable: String = "/Users/rcmerci/qwen3_asr_rs/asr-server",
+        launchArguments: [String] = ["--model-dir", "/Users/rcmerci/qwen3_asr_rs/Qwen3-ASR-0.6B"]
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -185,24 +222,30 @@ struct VoiceInputConfiguration: Codable, Equatable {
 }
 
 struct ControllerConfiguration: Codable, Equatable {
+    private static let wheelSlotCount = 5
+
     let buttons: [ControllerButton: ScriptBinding]
     let leftThumbstickWheel: LeftThumbstickWheelConfiguration
     let voiceInput: VoiceInputConfiguration?
+    let touchpad: TouchpadConfiguration
 
     private enum CodingKeys: String, CodingKey {
         case buttons
         case leftThumbstickWheel
         case voiceInput
+        case touchpad
     }
 
     init(
         buttons: [ControllerButton: ScriptBinding],
         leftThumbstickWheel: LeftThumbstickWheelConfiguration,
-        voiceInput: VoiceInputConfiguration? = nil
+        voiceInput: VoiceInputConfiguration? = nil,
+        touchpad: TouchpadConfiguration = .default
     ) {
         self.buttons = buttons
         self.leftThumbstickWheel = leftThumbstickWheel
         self.voiceInput = voiceInput
+        self.touchpad = touchpad
     }
 
     init(from decoder: Decoder) throws {
@@ -224,6 +267,7 @@ struct ControllerConfiguration: Codable, Equatable {
 
         self.leftThumbstickWheel = try container.decode(LeftThumbstickWheelConfiguration.self, forKey: .leftThumbstickWheel)
         self.voiceInput = try container.decodeIfPresent(VoiceInputConfiguration.self, forKey: .voiceInput)
+        self.touchpad = try container.decodeIfPresent(TouchpadConfiguration.self, forKey: .touchpad) ?? .default
     }
 
     func encode(to encoder: Encoder) throws {
@@ -233,6 +277,7 @@ struct ControllerConfiguration: Codable, Equatable {
         try container.encode(stringKeyedButtons, forKey: .buttons)
         try container.encode(leftThumbstickWheel, forKey: .leftThumbstickWheel)
         try container.encodeIfPresent(voiceInput, forKey: .voiceInput)
+        try container.encode(touchpad, forKey: .touchpad)
     }
 
     static let `default` = ControllerConfiguration(
@@ -244,11 +289,11 @@ struct ControllerConfiguration: Codable, Equatable {
                 ThumbstickWheelSlot(title: "Slot 2", script: ScriptBinding(name: "slot-2", command: "echo 'slot-2'")),
                 ThumbstickWheelSlot(title: "Slot 3", script: ScriptBinding(name: "slot-3", command: "echo 'slot-3'")),
                 ThumbstickWheelSlot(title: "Slot 4", script: ScriptBinding(name: "slot-4", command: "echo 'slot-4'")),
-                ThumbstickWheelSlot(title: "Slot 5", script: ScriptBinding(name: "slot-5", command: "echo 'slot-5'")),
                 ThumbstickWheelSlot(title: "Cancel", script: nil)
             ]
         ),
-        voiceInput: VoiceInputConfiguration(enabled: false, activationButton: .buttonOptions)
+        voiceInput: VoiceInputConfiguration(enabled: false, activationButton: .buttonOptions),
+        touchpad: .default
     )
 
     func normalizedForRuntime() -> ControllerConfiguration {
@@ -261,7 +306,8 @@ struct ControllerConfiguration: Codable, Equatable {
                 activationThreshold: threshold,
                 slots: slots
             ),
-            voiceInput: voiceInput?.normalizedForRuntime()
+            voiceInput: voiceInput?.normalizedForRuntime(),
+            touchpad: touchpad.normalizedForRuntime()
         )
     }
 
@@ -279,19 +325,19 @@ struct ControllerConfiguration: Codable, Equatable {
     }
 
     private func normalizedWheelSlots(_ currentSlots: [ThumbstickWheelSlot]) -> [ThumbstickWheelSlot] {
-        if currentSlots.count == 6 {
+        if currentSlots.count == Self.wheelSlotCount {
             return currentSlots
         }
 
-        if currentSlots.count > 6 {
-            return Array(currentSlots.prefix(6))
+        if currentSlots.count > Self.wheelSlotCount {
+            return Array(currentSlots.prefix(Self.wheelSlotCount))
         }
 
         var slots = currentSlots
-        while slots.count < 6 {
+        while slots.count < Self.wheelSlotCount {
             let index = slots.count + 1
 
-            if index == 6 {
+            if index == Self.wheelSlotCount {
                 slots.append(ThumbstickWheelSlot(title: "Cancel", script: nil))
             } else {
                 slots.append(

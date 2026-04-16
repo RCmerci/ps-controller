@@ -79,15 +79,16 @@ private final class LeftThumbstickWheelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        guard slots.count == 6 else { return }
+        guard slots.count >= 2 else { return }
 
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
         let radius = min(bounds.width, bounds.height) * 0.45
+        let segmentHalfAngle = segmentAngleDegrees / 2
 
-        for index in 0..<6 {
+        for index in slots.indices {
             let centerAngle = centerAngleDegrees(for: index)
-            let startAngle = centerAngle - 30.0
-            let endAngle = centerAngle + 30.0
+            let startAngle = centerAngle - segmentHalfAngle
+            let endAngle = centerAngle + segmentHalfAngle
 
             let segment = NSBezierPath()
             segment.move(to: center)
@@ -150,7 +151,11 @@ private final class LeftThumbstickWheelView: NSView {
         title.draw(at: drawPoint, withAttributes: attributes)
     }
 
+    private var segmentAngleDegrees: CGFloat {
+        360.0 / CGFloat(slots.count)
+    }
+
     private func centerAngleDegrees(for index: Int) -> CGFloat {
-        90.0 - (CGFloat(index) * 60.0)
+        90.0 - (CGFloat(index) * segmentAngleDegrees)
     }
 }

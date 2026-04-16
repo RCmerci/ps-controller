@@ -114,6 +114,7 @@ private final class ControllerActionHintView: NSView {
         .init(key: "leftTrigger", shortName: "L2"),
         .init(key: "leftShoulder", shortName: "L1"),
         .init(key: "leftThumbstickButton", shortName: "L3"),
+        .init(key: "touchpadButton", shortName: "TP"),
 
         .init(key: "rightTrigger", shortName: "R2"),
         .init(key: "rightShoulder", shortName: "R1"),
