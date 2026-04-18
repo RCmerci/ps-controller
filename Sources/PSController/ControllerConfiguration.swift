@@ -200,7 +200,7 @@ struct VoiceInputConfiguration: Codable, Equatable {
 
     init(
         enabled: Bool = false,
-        activationButton: ControllerButton = .buttonOptions,
+        activationButton: ControllerButton = .rightTrigger,
         asrServer: VoiceInputASRServerConfiguration = .default
     ) {
         self.enabled = enabled
@@ -328,7 +328,7 @@ struct ControllerConfiguration: Codable, Equatable {
                 ThumbstickWheelSlot(title: "Cancel", script: nil)
             ]
         ),
-        voiceInput: VoiceInputConfiguration(enabled: false, activationButton: .buttonOptions),
+        voiceInput: VoiceInputConfiguration(enabled: false, activationButton: .rightTrigger),
         touchpad: .default
     )
 

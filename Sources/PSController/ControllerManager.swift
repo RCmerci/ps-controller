@@ -26,6 +26,7 @@ final class ControllerManager {
     private static let defaultKeyActionLabel = "Default Key"
     private static let defaultTriggerRepeatInitialDelay: TimeInterval = 0.25
     private static let defaultTriggerRepeatInterval: TimeInterval = 0.08
+    private static let defaultVoiceInputLocaleIdentifier = "zh-CN"
     private static let repeatableButtons: Set<ControllerButton> = [.leftTrigger, .rightTrigger]
     private static let shellBuiltins: Set<String> = [
         "alias", "bg", "bind", "break", "builtin", "cd", "command", "declare", "dirs", "echo", "eval",
@@ -45,6 +46,7 @@ final class ControllerManager {
     private let voiceInputController: VoiceInputControlling
     private let textInputInjector: TextInputInjecting
     private let voiceTranscriptCorrector: VoiceTranscriptCorrecting
+    private let voiceTextTranslator: VoiceTextTranslating
     private let triggerRepeatInitialDelay: TimeInterval
     private let triggerRepeatInterval: TimeInterval
 
@@ -100,6 +102,7 @@ final class ControllerManager {
         voiceInputController: VoiceInputControlling = Qwen3ASRVoiceInputController(),
         textInputInjector: TextInputInjecting = CGEventTextInputInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = DictionaryVoiceTranscriptCorrector(),
+        voiceTextTranslator: VoiceTextTranslating = OllamaVoiceTextTranslator(),
         triggerRepeatInitialDelay: TimeInterval = ControllerManager.defaultTriggerRepeatInitialDelay,
         triggerRepeatInterval: TimeInterval = ControllerManager.defaultTriggerRepeatInterval
     ) {
@@ -113,6 +116,7 @@ final class ControllerManager {
         self.voiceInputController = voiceInputController
         self.textInputInjector = textInputInjector
         self.voiceTranscriptCorrector = voiceTranscriptCorrector
+        self.voiceTextTranslator = voiceTextTranslator
         self.triggerRepeatInitialDelay = max(0, triggerRepeatInitialDelay)
         self.triggerRepeatInterval = max(0.01, triggerRepeatInterval)
         self.configuration = applyRuntimeVoiceInputAdjustments(
@@ -158,7 +162,7 @@ final class ControllerManager {
         let asrAPIKeyConfigured = !(configuration.voiceInput?.asrServer.apiKey.isEmpty ?? true)
         let asrAutoStart = configuration.voiceInput?.asrServer.autoStart ?? false
         let asrLaunchExecutable = configuration.voiceInput?.asrServer.launchExecutable ?? "none"
-        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) leftWheelSlots=\(configuration.leftThumbstickWheel.slots.count) rightWheelSlots=\(configuration.rightThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=buttonB:zh-CN asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable)")
+        logInfo("Loaded configuration. buttonBindings=\(configuration.buttons.count) leftWheelSlots=\(configuration.leftThumbstickWheel.slots.count) rightWheelSlots=\(configuration.rightThumbstickWheel.slots.count) voiceInputEnabled=\(voiceInputEnabled) voiceInputButtons=\(voiceInputButtonLocaleMappingDescription()) asrBaseURL=\(asrBaseURL) asrModel=\(asrModel) asrApiKeyConfigured=\(asrAPIKeyConfigured) asrAutoStart=\(asrAutoStart) asrLaunchExecutable=\(asrLaunchExecutable)")
 
         prepareVoiceInputIfNeeded()
 
@@ -815,7 +819,7 @@ final class ControllerManager {
     }
 
     private func handleVoiceTranscript(_ event: VoiceTranscriptEvent) {
-        logInfo("voice_input_transcript final=\(event.isFinal) text=\(event.text)")
+        logInfo("voice_input_transcript final=\(event.isFinal) trigger=\(event.trigger ?? "unknown") text=\(event.text)")
 
         guard event.isFinal else {
             logDebug("voice_input_partial_skip_insertion")
@@ -830,7 +834,59 @@ final class ControllerManager {
 
         let corrected = voiceTranscriptCorrector.correct(normalized)
         let source = corrected == normalized ? "raw" : "dictionary_corrected"
-        insertVoiceTranscriptAtCursor(corrected, source: source)
+
+        guard shouldTranslateVoiceTranscript(trigger: event.trigger) else {
+            logInfo("voice_input_translation_skipped reason=button_b_legacy trigger=\(event.trigger ?? "unknown") source=\(source)")
+            insertVoiceTranscriptAtCursor(corrected, source: "\(source)_no_translation")
+            return
+        }
+
+        translateVoiceTranscriptToEnglishAndInsert(corrected, source: source)
+    }
+
+    private func translateVoiceTranscriptToEnglishAndInsert(_ text: String, source: String) {
+        logInfo("voice_input_translation_start source=\(source) inputChars=\(text.count)")
+
+        voiceTextTranslator.translateToEnglish(text: text) { [weak self] result in
+            guard let self else { return }
+
+            switch result {
+            case .success(let translated):
+                let normalizedTranslated = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedTranslated.isEmpty else {
+                    self.logError("voice_input_translation_failed reason=empty_translation source=\(source)")
+                    self.insertVoiceTranscriptAtCursor(text, source: "\(source)_translation_fallback")
+                    return
+                }
+
+                self.logInfo("voice_input_translation_success source=\(source) outputChars=\(normalizedTranslated.count)")
+                self.insertVoiceTranscriptAtCursor(normalizedTranslated, source: "\(source)_translated_en")
+
+            case .failure(let error):
+                self.logError("voice_input_translation_failed reason=ollama_error source=\(source) message=\(error.localizedDescription)")
+                self.insertVoiceTranscriptAtCursor(text, source: "\(source)_translation_fallback")
+            }
+        }
+    }
+
+    private func shouldTranslateVoiceTranscript(trigger: String?) -> Bool {
+        guard let voiceInput = configuration.voiceInput,
+              voiceInput.enabled else {
+            return true
+        }
+
+        guard let trigger else {
+            return true
+        }
+
+        let legacyButtonBTrigger = "button.\(ControllerButton.buttonB.rawValue)"
+        let activationButtonTrigger = "button.\(voiceInput.activationButton.rawValue)"
+
+        if trigger == legacyButtonBTrigger && trigger != activationButtonTrigger {
+            return false
+        }
+
+        return true
     }
 
     private func insertVoiceTranscriptAtCursor(_ text: String, source: String) {
@@ -849,7 +905,7 @@ final class ControllerManager {
             return
         }
 
-        logInfo("voice_input_prepare buttons=buttonB:zh-CN asrBaseURL=\(voiceInput.asrServer.baseURL) asrModel=\(voiceInput.asrServer.model) asrApiKeyConfigured=\(!voiceInput.asrServer.apiKey.isEmpty) asrAutoStart=\(voiceInput.asrServer.autoStart) asrLaunchExecutable=\(voiceInput.asrServer.launchExecutable)")
+        logInfo("voice_input_prepare buttons=\(voiceInputButtonLocaleMappingDescription()) asrBaseURL=\(voiceInput.asrServer.baseURL) asrModel=\(voiceInput.asrServer.model) asrApiKeyConfigured=\(!voiceInput.asrServer.apiKey.isEmpty) asrAutoStart=\(voiceInput.asrServer.autoStart) asrLaunchExecutable=\(voiceInput.asrServer.launchExecutable)")
         voiceInputController.prepare()
     }
 
@@ -873,12 +929,38 @@ final class ControllerManager {
     }
 
     private func voiceInputLocaleIdentifier(for button: ControllerButton) -> String? {
-        switch button {
-        case .buttonB:
-            return "zh-CN"
-        default:
+        guard let voiceInput = configuration.voiceInput,
+              voiceInput.enabled else {
             return nil
         }
+
+        let voiceButtons = voiceInputButtons(activationButton: voiceInput.activationButton)
+        guard voiceButtons.contains(button) else {
+            return nil
+        }
+
+        return Self.defaultVoiceInputLocaleIdentifier
+    }
+
+    private func voiceInputButtonLocaleMappingDescription() -> String {
+        guard let voiceInput = configuration.voiceInput,
+              voiceInput.enabled else {
+            return "none"
+        }
+
+        return voiceInputButtons(activationButton: voiceInput.activationButton)
+            .map { "\($0.rawValue):\(Self.defaultVoiceInputLocaleIdentifier)" }
+            .joined(separator: ",")
+    }
+
+    private func voiceInputButtons(activationButton: ControllerButton) -> [ControllerButton] {
+        var buttons: [ControllerButton] = [activationButton]
+
+        if activationButton != .buttonB {
+            buttons.append(.buttonB)
+        }
+
+        return buttons
     }
 
     private func handleFixedClickButton(_ button: ControllerButton, isPressed: Bool) -> Bool {

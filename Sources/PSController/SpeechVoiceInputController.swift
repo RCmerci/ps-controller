@@ -5,6 +5,13 @@ import OSLog
 struct VoiceTranscriptEvent: Equatable {
     let text: String
     let isFinal: Bool
+    let trigger: String?
+
+    init(text: String, isFinal: Bool, trigger: String? = nil) {
+        self.text = text
+        self.isFinal = isFinal
+        self.trigger = trigger
+    }
 }
 
 protocol VoiceInputControlling: AnyObject {
@@ -394,8 +401,8 @@ final class Qwen3ASRVoiceInputController: VoiceInputControlling {
             return
         }
 
-        logInfo("voice_transcript final=true locale=\(capture.localeIdentifier ?? "auto") text=\(transcript)")
-        onTranscript?(.init(text: transcript, isFinal: true))
+        logInfo("voice_transcript final=true trigger=\(capture.trigger) locale=\(capture.localeIdentifier ?? "auto") text=\(transcript)")
+        onTranscript?(.init(text: transcript, isFinal: true, trigger: capture.trigger))
         finalizeTranscriptionRequest(requestID: requestID, capture: capture)
     }
 

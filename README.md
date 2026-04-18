@@ -80,7 +80,7 @@ Reserved runtime behaviors (not script-mapped):
 
 - `buttonMenu`: hold to show an on-screen overlay listing all controller buttons and their current runtime function/script name; release to hide.
 - `touchpadButton`: always triggers one left click on press.
-- When `voiceInput.enabled=true`: `buttonB` is reserved for voice capture.
+- When `voiceInput.enabled=true`: both `voiceInput.activationButton` and `buttonB` are reserved for voice capture (legacy compatibility).
 
 ### Touchpad pointer behavior
 
@@ -113,7 +113,7 @@ You can enable controller-triggered voice transcription with `voiceInput`:
 {
   "voiceInput": {
     "enabled": true,
-    "activationButton": "buttonOptions",
+    "activationButton": "rightTrigger",
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
       "apiKey": "",
@@ -129,12 +129,14 @@ You can enable controller-triggered voice transcription with `voiceInput`:
 
 Runtime behavior:
 
-1. Press and hold `buttonB` to start `zh-CN` voice capture.
-2. Release `buttonB` to stop capture.
-3. Captured audio is sent to `qwen3-asr-rs` server via `POST /v1/audio/transcriptions` (OpenAI-compatible API).
-4. The ASR transcript is corrected with a local replacement dictionary.
-5. Final text is inserted into the currently focused text cursor.
-6. Detailed voice/dictionary state is emitted into app logs (`voice_input_*` / `voice_dictionary_*`).
+1. Press and hold `rightTrigger` (or your configured `voiceInput.activationButton`) to start `zh-CN` voice capture.
+2. Legacy compatibility: press and hold `buttonB` also starts `zh-CN` voice capture.
+3. Release the pressed voice button to stop capture.
+4. Captured audio is sent to `qwen3-asr-rs` server via `POST /v1/audio/transcriptions` (OpenAI-compatible API).
+5. The ASR transcript is corrected with a local replacement dictionary.
+6. If triggered by `buttonB` (legacy path), the corrected transcript is inserted directly without English translation.
+7. If triggered by `voiceInput.activationButton` (for example `rightTrigger`), corrected text is translated to English through local Ollama API (`POST /api/generate`, model: `gemma4:e4b`) and then inserted.
+8. Detailed voice/dictionary/translation state is emitted into app logs (`voice_input_*` / `voice_dictionary_*` / `voice_translation_*`).
 
 ### Voice replacement dictionary (`voice-word-replacements.json`)
 
@@ -165,12 +167,13 @@ Notes:
 
 - Voice input uses the **current macOS default input device**. For controller microphone usage, use a USB-connected controller and set it in `System Settings -> Sound -> Input`.
 - Bluetooth controller microphone is not supported by this project.
-- When `voiceInput.enabled` is `true`, `buttonB` is reserved for voice capture and its script mapping is skipped.
-- `voiceInput.activationButton` is kept in config for backward compatibility but is currently ignored at runtime.
+- When `voiceInput.enabled` is `true`, both `voiceInput.activationButton` and `buttonB` are reserved for voice capture and their script mappings are skipped.
+- Voice capture locale is currently fixed to `zh-CN`; adjust source code if you need another locale.
 - `voiceInput.asrServer.baseURL` should point to your local `qwen3-asr-rs` server root URL (for example `http://127.0.0.1:8765`).
 - `voiceInput.asrServer.apiKey` is optional for local `qwen3-asr-rs`; leave empty unless your proxy/service requires Bearer auth.
 - Set `voiceInput.asrServer.autoStart=true` if you want app-managed server startup.
 - `voiceInput.asrServer.launchExecutable` and `launchArguments` control how the app launches the server process.
+- English translation (used for `voiceInput.activationButton` path, e.g. `rightTrigger`) requires local Ollama server at `http://127.0.0.1:11434`, using model `gemma4:e4b`.
 - For `qwen3-asr-rs`, `--model-dir` is required in `launchArguments`.
 - This project intentionally uses an OpenAI-compatible **HTTP server mode** (`POST /v1/audio/transcriptions`), not per-request CLI transcription mode, to avoid model reload on every transcription.
 - Startup dependency issues (missing command/config/service) are shown in the menu bar dropdown under `Dependencies`.

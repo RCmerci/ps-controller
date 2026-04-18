@@ -79,7 +79,7 @@
   },
   "voiceInput": {
     "enabled": true,
-    "activationButton": "buttonB",
+    "activationButton": "rightTrigger",
     "asrServer": {
       "baseURL": "http://127.0.0.1:8765",
       "apiKey": "",

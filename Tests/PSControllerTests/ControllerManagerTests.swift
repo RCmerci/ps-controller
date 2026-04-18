@@ -473,7 +473,36 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(executor.executions.count, 0)
     }
 
-    func testButtonBVoiceInputStartsAndStopsWithZhCNLocale() {
+    func testRightTriggerVoiceInputStartsAndStopsWithZhCNLocale() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let config = ControllerConfiguration(
+            buttons: [
+                .rightTrigger: ScriptBinding(name: "right-trigger-script", command: "echo r2")
+            ],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput
+        )
+
+        sut.handleButtonInput(.rightTrigger, isPressed: true)
+        sut.handleButtonInput(.rightTrigger, isPressed: false)
+
+        XCTAssertEqual(voiceInput.startTriggers, ["button.rightTrigger"])
+        XCTAssertEqual(voiceInput.startLocaleIdentifiers, ["zh-CN"])
+        XCTAssertEqual(voiceInput.stopTriggers, ["button.rightTrigger"])
+        XCTAssertEqual(executor.executions.count, 0)
+    }
+
+    func testButtonBStillStartsVoiceInputWhenActivationButtonIsRightTrigger() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
@@ -482,7 +511,7 @@ final class ControllerManagerTests: XCTestCase {
                 .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
             ],
             leftThumbstickWheel: makeWheelConfig(),
-            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .buttonB)
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
         ).normalizedForRuntime()
 
         let sut = makeSUT(
@@ -511,7 +540,7 @@ final class ControllerManagerTests: XCTestCase {
                 .buttonX: ScriptBinding(name: "button-x-script", command: "echo x")
             ],
             leftThumbstickWheel: makeWheelConfig(),
-            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .buttonB)
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
         ).normalizedForRuntime()
 
         let sut = makeSUT(
@@ -570,7 +599,7 @@ final class ControllerManagerTests: XCTestCase {
                 .buttonMenu: ScriptBinding(name: "should-not-run", command: "echo menu")
             ],
             leftThumbstickWheel: makeWheelConfig(),
-            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .buttonB)
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
         ).normalizedForRuntime()
 
         let sut = makeSUT(
@@ -597,6 +626,7 @@ final class ControllerManagerTests: XCTestCase {
             XCTAssertTrue(content.contains(button.rawValue), "Missing button in overlay: \(button.rawValue)")
         }
 
+        XCTAssertTrue(content.contains("rightTrigger -> Voice Input (zh-CN)"))
         XCTAssertTrue(content.contains("buttonB -> Voice Input (zh-CN)"))
         XCTAssertTrue(content.contains("buttonX -> Default Key"))
         XCTAssertTrue(content.contains("touchpadButton -> Left Click"))
@@ -658,6 +688,103 @@ final class ControllerManagerTests: XCTestCase {
         voiceInput.emitTranscript(text: "你好世界", isFinal: true)
 
         XCTAssertEqual(textInjector.insertedTexts, ["你好世界"])
+    }
+
+    func testFinalVoiceTranscriptTranslatesToEnglishBeforeInsertion() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let textInjector = MockTextInputInjector()
+        let translator = MockVoiceTextTranslator()
+        translator.translatedText = "Hello world"
+
+        let config = ControllerConfiguration(
+            buttons: [:],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput,
+            textInputInjector: textInjector,
+            voiceTextTranslator: translator
+        )
+
+        _ = sut
+        voiceInput.emitTranscript(text: "你好世界", isFinal: true, trigger: "button.rightTrigger")
+
+        XCTAssertEqual(translator.inputs, ["你好世界"])
+        XCTAssertEqual(textInjector.insertedTexts, ["Hello world"])
+    }
+
+    func testButtonBLegacyVoiceTranscriptSkipsEnglishTranslation() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let textInjector = MockTextInputInjector()
+        let translator = MockVoiceTextTranslator()
+        translator.translatedText = "Hello world"
+
+        let config = ControllerConfiguration(
+            buttons: [:],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput,
+            textInputInjector: textInjector,
+            voiceTextTranslator: translator
+        )
+
+        _ = sut
+        voiceInput.emitTranscript(text: "你好世界", isFinal: true, trigger: "button.buttonB")
+
+        XCTAssertEqual(translator.inputs, [])
+        XCTAssertEqual(textInjector.insertedTexts, ["你好世界"])
+    }
+
+    func testVoiceTranslationFailureFallsBackToCorrectedTranscriptInsertion() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let textInjector = MockTextInputInjector()
+        let translator = MockVoiceTextTranslator()
+        translator.translationError = NSError(domain: "test", code: -1)
+        let corrector = MockVoiceTranscriptCorrector()
+        corrector.correctedText = "open Emacs"
+
+        let config = ControllerConfiguration(
+            buttons: [:],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput,
+            textInputInjector: textInjector,
+            voiceTranscriptCorrector: corrector,
+            voiceTextTranslator: translator
+        )
+
+        _ = sut
+        voiceInput.emitTranscript(text: "open IMAX", isFinal: true, trigger: "button.rightTrigger")
+
+        XCTAssertEqual(corrector.correctCalls, ["open IMAX"])
+        XCTAssertEqual(translator.inputs, ["open Emacs"])
+        XCTAssertEqual(textInjector.insertedTexts, ["open Emacs"])
     }
 
     func testFinalVoiceTranscriptAppliesDictionaryCorrection() {
@@ -1295,6 +1422,7 @@ final class ControllerManagerTests: XCTestCase {
         voiceInputController: VoiceInputControlling = MockVoiceInputController(),
         textInputInjector: TextInputInjecting = MockTextInputInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = MockVoiceTranscriptCorrector(),
+        voiceTextTranslator: VoiceTextTranslating = MockVoiceTextTranslator(),
         controllerActionHintPresenter: ControllerActionHintPresenting = MockControllerActionHintPresenter(),
         triggerRepeatInitialDelay: TimeInterval = 0.25,
         triggerRepeatInterval: TimeInterval = 0.08
@@ -1310,6 +1438,7 @@ final class ControllerManagerTests: XCTestCase {
             voiceInputController: voiceInputController,
             textInputInjector: textInputInjector,
             voiceTranscriptCorrector: voiceTranscriptCorrector,
+            voiceTextTranslator: voiceTextTranslator,
             triggerRepeatInitialDelay: triggerRepeatInitialDelay,
             triggerRepeatInterval: triggerRepeatInterval
         )
@@ -1410,8 +1539,8 @@ private final class MockVoiceInputController: VoiceInputControlling {
         stopTriggers.append(trigger)
     }
 
-    func emitTranscript(text: String, isFinal: Bool) {
-        onTranscript?(.init(text: text, isFinal: isFinal))
+    func emitTranscript(text: String, isFinal: Bool, trigger: String? = nil) {
+        onTranscript?(.init(text: text, isFinal: isFinal, trigger: trigger))
     }
 }
 
@@ -1432,6 +1561,23 @@ private final class MockVoiceTranscriptCorrector: VoiceTranscriptCorrecting {
     func correct(_ text: String) -> String {
         correctCalls.append(text)
         return correctedText ?? text
+    }
+}
+
+private final class MockVoiceTextTranslator: VoiceTextTranslating {
+    var translatedText: String?
+    var translationError: Error?
+    private(set) var inputs: [String] = []
+
+    func translateToEnglish(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+        inputs.append(text)
+
+        if let translationError {
+            completion(.failure(translationError))
+            return
+        }
+
+        completion(.success(translatedText ?? text))
     }
 }
 
