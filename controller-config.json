@@ -57,8 +57,8 @@
       "command": "echo 'Configure script for leftTrigger'"
     },
     "rightShoulder": {
-      "name": "Press Ctrl-Enter",
-      "command": "osascript -e 'tell application \"System Events\" to key code 36 using control down'"
+      "name": "Press Control-j",
+      "command": "osascript -e 'tell application \"System Events\" to keystroke \"j\" using control down'"
     },
     "rightThumbstickButton": {
       "name": "rightThumbstickButton",
