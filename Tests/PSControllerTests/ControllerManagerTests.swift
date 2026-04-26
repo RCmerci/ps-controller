@@ -4,7 +4,7 @@ import Foundation
 @testable import PSController
 
 final class ControllerManagerTests: XCTestCase {
-    func testConfiguredButtonPressExecutesMappedScript() {
+    func testConfiguredButtonPressExecutesMappedScriptForButtonA() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let config = ControllerConfiguration(
@@ -29,11 +29,9 @@ final class ControllerManagerTests: XCTestCase {
         sut.handlePrimaryButtonPress(isPressed: true)
         sut.handleSecondaryButtonPress(isPressed: true)
 
-        XCTAssertEqual(executor.executions.count, 2)
+        XCTAssertEqual(executor.executions.count, 1)
         XCTAssertEqual(executor.executions[0].trigger, "button.buttonA")
         XCTAssertEqual(executor.executions[0].binding.name, "script-a")
-        XCTAssertEqual(executor.executions[1].trigger, "button.buttonB")
-        XCTAssertEqual(executor.executions[1].binding.name, "script-b")
     }
 
     func testTouchpadButtonPressTriggersLeftClickAndSkipsScript() {
@@ -502,10 +500,50 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(executor.executions.count, 0)
     }
 
-    func testButtonBStillStartsVoiceInputWhenActivationButtonIsRightTrigger() {
+    func testButtonBStillUsesCodexShortcutWhenActivationButtonIsButtonB() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
+        let keyboard = MockKeyboardShortcutInjector()
+        let config = ControllerConfiguration(
+            buttons: [
+                .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
+            ],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .buttonB)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput,
+            keyboardShortcutInjector: keyboard
+        )
+
+        sut.handleButtonInput(.buttonB, isPressed: true)
+        sut.handleButtonInput(.buttonB, isPressed: false)
+
+        XCTAssertEqual(voiceInput.startTriggers, [])
+        XCTAssertEqual(voiceInput.stopTriggers, [])
+        XCTAssertEqual(
+            keyboard.events,
+            [
+                .init(key: 59, modifiers: [], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: false),
+                .init(key: 59, modifiers: [], isKeyDown: false)
+            ]
+        )
+        XCTAssertEqual(executor.executions.count, 0)
+    }
+
+    func testButtonBUsesCodexVoiceShortcutInsteadOfLocalVoiceInput() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let keyboard = MockKeyboardShortcutInjector()
         let config = ControllerConfiguration(
             buttons: [
                 .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
@@ -519,16 +557,53 @@ final class ControllerManagerTests: XCTestCase {
             configProvider: MockConfigurationProvider(configuration: config),
             scriptExecutor: executor,
             wheelPresenter: MockLeftThumbstickWheelPresenter(),
-            voiceInputController: voiceInput
+            voiceInputController: voiceInput,
+            keyboardShortcutInjector: keyboard
         )
 
         sut.handleButtonInput(.buttonB, isPressed: true)
         sut.handleButtonInput(.buttonB, isPressed: false)
 
-        XCTAssertEqual(voiceInput.startTriggers, ["button.buttonB"])
-        XCTAssertEqual(voiceInput.startLocaleIdentifiers, ["zh-CN"])
-        XCTAssertEqual(voiceInput.stopTriggers, ["button.buttonB"])
+        XCTAssertEqual(voiceInput.startTriggers, [])
+        XCTAssertEqual(voiceInput.startLocaleIdentifiers, [])
+        XCTAssertEqual(voiceInput.stopTriggers, [])
         XCTAssertEqual(executor.executions.count, 0)
+    }
+
+    func testButtonBPressAndReleaseTriggerCtrlZShortcutDownAndUp() {
+        let bridge = MockMouseEventBridge()
+        let executor = MockScriptExecutor()
+        let voiceInput = MockVoiceInputController()
+        let keyboard = MockKeyboardShortcutInjector()
+        let config = ControllerConfiguration(
+            buttons: [
+                .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
+            ],
+            leftThumbstickWheel: makeWheelConfig(),
+            voiceInput: VoiceInputConfiguration(enabled: true, activationButton: .rightTrigger)
+        ).normalizedForRuntime()
+
+        let sut = makeSUT(
+            bridge: bridge,
+            configProvider: MockConfigurationProvider(configuration: config),
+            scriptExecutor: executor,
+            wheelPresenter: MockLeftThumbstickWheelPresenter(),
+            voiceInputController: voiceInput,
+            keyboardShortcutInjector: keyboard
+        )
+
+        sut.handleButtonInput(.buttonB, isPressed: true)
+        sut.handleButtonInput(.buttonB, isPressed: false)
+
+        XCTAssertEqual(
+            keyboard.events,
+            [
+                .init(key: 59, modifiers: [], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: false),
+                .init(key: 59, modifiers: [], isKeyDown: false)
+            ]
+        )
     }
 
     func testButtonXExecutesMappedScriptWhenVoiceInputEnabled() {
@@ -560,10 +635,11 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(executor.executions[0].trigger, "button.buttonX")
     }
 
-    func testVoiceInputDisabledFallsBackToButtonScript() {
+    func testButtonBUsesCodexShortcutEvenWhenVoiceInputDisabled() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
+        let keyboard = MockKeyboardShortcutInjector()
         let config = ControllerConfiguration(
             buttons: [
                 .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
@@ -577,7 +653,8 @@ final class ControllerManagerTests: XCTestCase {
             configProvider: MockConfigurationProvider(configuration: config),
             scriptExecutor: executor,
             wheelPresenter: MockLeftThumbstickWheelPresenter(),
-            voiceInputController: voiceInput
+            voiceInputController: voiceInput,
+            keyboardShortcutInjector: keyboard
         )
 
         sut.handleButtonInput(.buttonB, isPressed: true)
@@ -585,8 +662,16 @@ final class ControllerManagerTests: XCTestCase {
 
         XCTAssertEqual(voiceInput.startTriggers.count, 0)
         XCTAssertEqual(voiceInput.stopTriggers.count, 0)
-        XCTAssertEqual(executor.executions.count, 1)
-        XCTAssertEqual(executor.executions[0].trigger, "button.buttonB")
+        XCTAssertEqual(executor.executions.count, 0)
+        XCTAssertEqual(
+            keyboard.events,
+            [
+                .init(key: 59, modifiers: [], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: true),
+                .init(key: 6, modifiers: [.maskControl], isKeyDown: false),
+                .init(key: 59, modifiers: [], isKeyDown: false)
+            ]
+        )
     }
 
     func testMenuButtonPressShowsActionOverlayAndReleaseHidesIt() {
@@ -627,7 +712,7 @@ final class ControllerManagerTests: XCTestCase {
         }
 
         XCTAssertTrue(content.contains("rightTrigger -> Voice Input (zh-CN)"))
-        XCTAssertTrue(content.contains("buttonB -> Voice Input (zh-CN)"))
+        XCTAssertTrue(content.contains("buttonB -> Codex Voice Input (Ctrl+Z hold)"))
         XCTAssertTrue(content.contains("buttonX -> Default Key"))
         XCTAssertTrue(content.contains("touchpadButton -> Left Click"))
         XCTAssertTrue(content.contains("rightThumbstickButton -> Default Key"))
@@ -721,7 +806,7 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertEqual(textInjector.insertedTexts, ["Hello world"])
     }
 
-    func testButtonBLegacyVoiceTranscriptSkipsEnglishTranslation() {
+    func testButtonBTriggeredTranscriptStillTranslatesToEnglish() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
@@ -748,8 +833,8 @@ final class ControllerManagerTests: XCTestCase {
         _ = sut
         voiceInput.emitTranscript(text: "你好世界", isFinal: true, trigger: "button.buttonB")
 
-        XCTAssertEqual(translator.inputs, [])
-        XCTAssertEqual(textInjector.insertedTexts, ["你好世界"])
+        XCTAssertEqual(translator.inputs, ["你好世界"])
+        XCTAssertEqual(textInjector.insertedTexts, ["Hello world"])
     }
 
     func testVoiceTranslationFailureFallsBackToCorrectedTranscriptInsertion() {
@@ -881,10 +966,11 @@ final class ControllerManagerTests: XCTestCase {
         XCTAssertTrue(textInjector.insertedTexts.isEmpty)
     }
 
-    func testPausedControlBlocksVoiceInputActivation() {
+    func testPausedControlBlocksButtonBCodexVoiceShortcut() {
         let bridge = MockMouseEventBridge()
         let executor = MockScriptExecutor()
         let voiceInput = MockVoiceInputController()
+        let keyboard = MockKeyboardShortcutInjector()
         let config = ControllerConfiguration(
             buttons: [
                 .buttonB: ScriptBinding(name: "button-b-script", command: "echo b")
@@ -898,7 +984,8 @@ final class ControllerManagerTests: XCTestCase {
             configProvider: MockConfigurationProvider(configuration: config),
             scriptExecutor: executor,
             wheelPresenter: MockLeftThumbstickWheelPresenter(),
-            voiceInputController: voiceInput
+            voiceInputController: voiceInput,
+            keyboardShortcutInjector: keyboard
         )
 
         sut.setControlEnabled(false)
@@ -906,8 +993,9 @@ final class ControllerManagerTests: XCTestCase {
         sut.handleButtonInput(.buttonB, isPressed: false)
 
         XCTAssertEqual(voiceInput.startTriggers.count, 0)
-        XCTAssertEqual(voiceInput.stopTriggers.count, 1)
+        XCTAssertEqual(voiceInput.stopTriggers, ["control_paused"])
         XCTAssertEqual(executor.executions.count, 0)
+        XCTAssertEqual(keyboard.events, [])
     }
 
     func testMissingBindingSkipsExecution() {
@@ -1421,6 +1509,7 @@ final class ControllerManagerTests: XCTestCase {
         rightWheelPresenter: LeftThumbstickWheelPresenting? = nil,
         voiceInputController: VoiceInputControlling = MockVoiceInputController(),
         textInputInjector: TextInputInjecting = MockTextInputInjector(),
+        keyboardShortcutInjector: KeyboardShortcutInjecting = MockKeyboardShortcutInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = MockVoiceTranscriptCorrector(),
         voiceTextTranslator: VoiceTextTranslating = MockVoiceTextTranslator(),
         controllerActionHintPresenter: ControllerActionHintPresenting = MockControllerActionHintPresenter(),
@@ -1437,6 +1526,7 @@ final class ControllerManagerTests: XCTestCase {
             controllerActionHintPresenter: controllerActionHintPresenter,
             voiceInputController: voiceInputController,
             textInputInjector: textInputInjector,
+            keyboardShortcutInjector: keyboardShortcutInjector,
             voiceTranscriptCorrector: voiceTranscriptCorrector,
             voiceTextTranslator: voiceTextTranslator,
             triggerRepeatInitialDelay: triggerRepeatInitialDelay,
@@ -1550,6 +1640,22 @@ private final class MockTextInputInjector: TextInputInjecting {
     @discardableResult
     func insertAtCursor(text: String) -> Bool {
         insertedTexts.append(text)
+        return true
+    }
+}
+
+private final class MockKeyboardShortcutInjector: KeyboardShortcutInjecting {
+    struct Event: Equatable {
+        let key: CGKeyCode
+        let modifiers: CGEventFlags
+        let isKeyDown: Bool
+    }
+
+    private(set) var events: [Event] = []
+
+    @discardableResult
+    func postKeyEvent(keyCode: CGKeyCode, modifiers: CGEventFlags, isKeyDown: Bool) -> Bool {
+        events.append(.init(key: keyCode, modifiers: modifiers, isKeyDown: isKeyDown))
         return true
     }
 }

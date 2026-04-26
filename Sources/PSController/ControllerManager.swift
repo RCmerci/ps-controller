@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import GameController
 import OSLog
 
@@ -27,6 +28,9 @@ final class ControllerManager {
     private static let defaultTriggerRepeatInitialDelay: TimeInterval = 0.25
     private static let defaultTriggerRepeatInterval: TimeInterval = 0.08
     private static let defaultVoiceInputLocaleIdentifier = "zh-CN"
+    private static let codexVoiceInputShortcutKeyCode: CGKeyCode = 6
+    private static let codexVoiceInputModifierKeyCode: CGKeyCode = 59
+    private static let codexVoiceInputShortcutModifiers: CGEventFlags = .maskControl
     private static let repeatableButtons: Set<ControllerButton> = [.leftTrigger, .rightTrigger]
     private static let shellBuiltins: Set<String> = [
         "alias", "bg", "bind", "break", "builtin", "cd", "command", "declare", "dirs", "echo", "eval",
@@ -45,6 +49,7 @@ final class ControllerManager {
     private let controllerActionHintPresenter: ControllerActionHintPresenting
     private let voiceInputController: VoiceInputControlling
     private let textInputInjector: TextInputInjecting
+    private let keyboardShortcutInjector: KeyboardShortcutInjecting
     private let voiceTranscriptCorrector: VoiceTranscriptCorrecting
     private let voiceTextTranslator: VoiceTextTranslating
     private let triggerRepeatInitialDelay: TimeInterval
@@ -101,6 +106,7 @@ final class ControllerManager {
         controllerActionHintPresenter: ControllerActionHintPresenting = ControllerActionHintPresenter(),
         voiceInputController: VoiceInputControlling = Qwen3ASRVoiceInputController(),
         textInputInjector: TextInputInjecting = CGEventTextInputInjector(),
+        keyboardShortcutInjector: KeyboardShortcutInjecting = CGEventKeyboardShortcutInjector(),
         voiceTranscriptCorrector: VoiceTranscriptCorrecting = DictionaryVoiceTranscriptCorrector(),
         voiceTextTranslator: VoiceTextTranslating = OllamaVoiceTextTranslator(),
         triggerRepeatInitialDelay: TimeInterval = ControllerManager.defaultTriggerRepeatInitialDelay,
@@ -115,6 +121,7 @@ final class ControllerManager {
         self.controllerActionHintPresenter = controllerActionHintPresenter
         self.voiceInputController = voiceInputController
         self.textInputInjector = textInputInjector
+        self.keyboardShortcutInjector = keyboardShortcutInjector
         self.voiceTranscriptCorrector = voiceTranscriptCorrector
         self.voiceTextTranslator = voiceTextTranslator
         self.triggerRepeatInitialDelay = max(0, triggerRepeatInitialDelay)
@@ -638,6 +645,10 @@ final class ControllerManager {
             return
         }
 
+        if handleCodexVoiceInputButton(button, isPressed: isPressed) {
+            return
+        }
+
         if handleFixedClickButton(button, isPressed: isPressed) {
             return
         }
@@ -782,6 +793,10 @@ final class ControllerManager {
             return "Left Click"
         }
 
+        if isCodexVoiceInputButton(button) {
+            return "Codex Voice Input (Ctrl+Z hold)"
+        }
+
         if configuration.voiceInput?.enabled == true, let locale = voiceInputLocaleIdentifier(for: button) {
             return "Voice Input (\(locale))"
         }
@@ -870,23 +885,7 @@ final class ControllerManager {
     }
 
     private func shouldTranslateVoiceTranscript(trigger: String?) -> Bool {
-        guard let voiceInput = configuration.voiceInput,
-              voiceInput.enabled else {
-            return true
-        }
-
-        guard let trigger else {
-            return true
-        }
-
-        let legacyButtonBTrigger = "button.\(ControllerButton.buttonB.rawValue)"
-        let activationButtonTrigger = "button.\(voiceInput.activationButton.rawValue)"
-
-        if trigger == legacyButtonBTrigger && trigger != activationButtonTrigger {
-            return false
-        }
-
-        return true
+        true
     }
 
     private func insertVoiceTranscriptAtCursor(_ text: String, source: String) {
@@ -928,14 +927,53 @@ final class ControllerManager {
         return true
     }
 
-    private func voiceInputLocaleIdentifier(for button: ControllerButton) -> String? {
-        guard let voiceInput = configuration.voiceInput,
-              voiceInput.enabled else {
-            return nil
+    private func handleCodexVoiceInputButton(_ button: ControllerButton, isPressed: Bool) -> Bool {
+        guard isCodexVoiceInputButton(button) else {
+            return false
         }
 
-        let voiceButtons = voiceInputButtons(activationButton: voiceInput.activationButton)
-        guard voiceButtons.contains(button) else {
+        let postedModifier: Bool
+        let postedShortcut: Bool
+
+        if isPressed {
+            postedModifier = keyboardShortcutInjector.postKeyEvent(
+                keyCode: Self.codexVoiceInputModifierKeyCode,
+                modifiers: [],
+                isKeyDown: true
+            )
+            postedShortcut = keyboardShortcutInjector.postKeyEvent(
+                keyCode: Self.codexVoiceInputShortcutKeyCode,
+                modifiers: Self.codexVoiceInputShortcutModifiers,
+                isKeyDown: true
+            )
+        } else {
+            postedShortcut = keyboardShortcutInjector.postKeyEvent(
+                keyCode: Self.codexVoiceInputShortcutKeyCode,
+                modifiers: Self.codexVoiceInputShortcutModifiers,
+                isKeyDown: false
+            )
+            postedModifier = keyboardShortcutInjector.postKeyEvent(
+                keyCode: Self.codexVoiceInputModifierKeyCode,
+                modifiers: [],
+                isKeyDown: false
+            )
+        }
+
+        logInfo(
+            "codex_voice_input_shortcut button=\(button.rawValue) pressed=\(isPressed) postedModifier=\(postedModifier) postedShortcut=\(postedShortcut) modifierKeyCode=\(Self.codexVoiceInputModifierKeyCode) shortcutKeyCode=\(Self.codexVoiceInputShortcutKeyCode)"
+        )
+        return true
+    }
+
+    private func isCodexVoiceInputButton(_ button: ControllerButton) -> Bool {
+        button == .buttonB
+    }
+
+    private func voiceInputLocaleIdentifier(for button: ControllerButton) -> String? {
+        guard button != .buttonB,
+              let voiceInput = configuration.voiceInput,
+              voiceInput.enabled,
+              button == voiceInput.activationButton else {
             return nil
         }
 
@@ -948,19 +986,7 @@ final class ControllerManager {
             return "none"
         }
 
-        return voiceInputButtons(activationButton: voiceInput.activationButton)
-            .map { "\($0.rawValue):\(Self.defaultVoiceInputLocaleIdentifier)" }
-            .joined(separator: ",")
-    }
-
-    private func voiceInputButtons(activationButton: ControllerButton) -> [ControllerButton] {
-        var buttons: [ControllerButton] = [activationButton]
-
-        if activationButton != .buttonB {
-            buttons.append(.buttonB)
-        }
-
-        return buttons
+        return "\(voiceInput.activationButton.rawValue):\(Self.defaultVoiceInputLocaleIdentifier)"
     }
 
     private func handleFixedClickButton(_ button: ControllerButton, isPressed: Bool) -> Bool {

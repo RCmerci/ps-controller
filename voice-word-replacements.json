@@ -27,7 +27,12 @@
     "Log萨克",
     "logsec",
     "logback",
-    "logstack"
+    "logstack",
+    "logstash",
+    "Logstash"
+  ],
+  "CLI": [
+    "C L I"
   ],
   "Python": [
     "配森",

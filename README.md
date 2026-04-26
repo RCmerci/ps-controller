@@ -80,7 +80,8 @@ Reserved runtime behaviors (not script-mapped):
 
 - `buttonMenu`: hold to show an on-screen overlay listing all controller buttons and their current runtime function/script name; release to hide.
 - `touchpadButton`: always triggers one left click on press.
-- When `voiceInput.enabled=true`: both `voiceInput.activationButton` and `buttonB` are reserved for voice capture (legacy compatibility).
+- `buttonB`: built-in Codex voice input shortcut; press-and-hold sends `Ctrl+Z` key down, release sends `Ctrl+Z` key up.
+- When `voiceInput.enabled=true`: `voiceInput.activationButton` is reserved for local voice capture.
 
 ### Touchpad pointer behavior
 
@@ -130,13 +131,17 @@ You can enable controller-triggered voice transcription with `voiceInput`:
 Runtime behavior:
 
 1. Press and hold `rightTrigger` (or your configured `voiceInput.activationButton`) to start `zh-CN` voice capture.
-2. Legacy compatibility: press and hold `buttonB` also starts `zh-CN` voice capture.
-3. Release the pressed voice button to stop capture.
-4. Captured audio is sent to `qwen3-asr-rs` server via `POST /v1/audio/transcriptions` (OpenAI-compatible API).
-5. The ASR transcript is corrected with a local replacement dictionary.
-6. If triggered by `buttonB` (legacy path), the corrected transcript is inserted directly without English translation.
-7. If triggered by `voiceInput.activationButton` (for example `rightTrigger`), corrected text is translated to English through local Ollama API (`POST /api/generate`, model: `gemma4:e4b`) and then inserted.
-8. Detailed voice/dictionary/translation state is emitted into app logs (`voice_input_*` / `voice_dictionary_*` / `voice_translation_*`).
+2. Release the configured voice button to stop capture.
+3. Captured audio is sent to `qwen3-asr-rs` server via `POST /v1/audio/transcriptions` (OpenAI-compatible API).
+4. The ASR transcript is corrected with a local replacement dictionary.
+5. Corrected text is translated to English through local Ollama API (`POST /api/generate`, model: `gemma4:e4b`) and then inserted.
+6. Detailed voice/dictionary/translation state is emitted into app logs (`voice_input_*` / `voice_dictionary_*` / `voice_translation_*`).
+
+Separately, `buttonB` is always reserved for Codex voice input integration:
+
+1. Press and hold `buttonB` to send `Ctrl+Z` key down.
+2. Release `buttonB` to send `Ctrl+Z` key up.
+3. PSController does not perform ASR/transcription for `buttonB`; CodexApp handles the voice input session.
 
 ### Voice replacement dictionary (`voice-word-replacements.json`)
 
@@ -167,7 +172,8 @@ Notes:
 
 - Voice input uses the **current macOS default input device**. For controller microphone usage, use a USB-connected controller and set it in `System Settings -> Sound -> Input`.
 - Bluetooth controller microphone is not supported by this project.
-- When `voiceInput.enabled` is `true`, both `voiceInput.activationButton` and `buttonB` are reserved for voice capture and their script mappings are skipped.
+- `buttonB` is always reserved for the built-in Codex voice input shortcut (`Ctrl+Z` hold) and its script mapping is skipped.
+- When `voiceInput.enabled` is `true`, `voiceInput.activationButton` is reserved for local voice capture and its script mapping is skipped.
 - Voice capture locale is currently fixed to `zh-CN`; adjust source code if you need another locale.
 - `voiceInput.asrServer.baseURL` should point to your local `qwen3-asr-rs` server root URL (for example `http://127.0.0.1:8765`).
 - `voiceInput.asrServer.apiKey` is optional for local `qwen3-asr-rs`; leave empty unless your proxy/service requires Bearer auth.

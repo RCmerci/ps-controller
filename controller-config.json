@@ -5,8 +5,8 @@
       "command": "osascript -e 'tell application \"System Events\" to key code 36'"
     },
     "buttonB": {
-      "name": "Press Right Command Twice",
-      "command": "osascript -e 'tell application \"System Events\" to key code 54' -e 'delay 0.2' -e 'tell application \"System Events\" to key code 54'"
+      "name": "Codex Voice Input (Ctrl+Z hold)",
+      "command": "echo 'buttonB is handled by built-in Codex voice shortcut (Ctrl+Z hold)'"
     },
     "buttonHome": {
       "name": "buttonHome",
